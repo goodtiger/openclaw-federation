@@ -16,12 +16,34 @@ NC='\033[0m'
 
 # 默认配置
 GATEWAY_PORT=18789
-DEFAULT_TOKEN_FILE="/root/.openclaw/.federation-token"
-TOKEN_FILE="${TOKEN_FILE:-$DEFAULT_TOKEN_FILE}"
-CONFIG_FILE="/root/.openclaw/openclaw.json"
-BACKUP_DIR="/root/.openclaw/.backups"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
+
+resolve_openclaw_home() {
+  if [[ -n "${OPENCLAW_HOME:-}" ]]; then
+    echo "$OPENCLAW_HOME"
+    return 0
+  fi
+
+  local user_home="$HOME"
+  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+    if command -v getent &> /dev/null; then
+      user_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    elif [[ -d "/Users/$SUDO_USER" ]]; then
+      user_home="/Users/$SUDO_USER"
+    elif [[ -d "/home/$SUDO_USER" ]]; then
+      user_home="/home/$SUDO_USER"
+    fi
+  fi
+  echo "$user_home/.openclaw"
+}
+
+OPENCLAW_HOME="$(resolve_openclaw_home)"
+DEFAULT_TOKEN_FILE="$OPENCLAW_HOME/.federation-token"
+TOKEN_FILE="${TOKEN_FILE:-$DEFAULT_TOKEN_FILE}"
+CONFIG_FILE="$OPENCLAW_HOME/openclaw.json"
+BACKUP_DIR="$OPENCLAW_HOME/.backups"
+
 ROLE="${1:-}"
 shift || true
 
@@ -110,6 +132,7 @@ OpenClaw + Tailscale 联邦部署脚本（Token 共享版）
 环境变量:
   FEDERATION_TOKEN        共享 Token（优先级高于 --token）
   TOKEN_FILE              Token 文件路径（默认: ~/.openclaw/.federation-token）
+  OPENCLAW_HOME           OpenClaw 工作目录（默认: ~/.openclaw 或 sudo 用户家目录）
   ALLOW_UNSAFE_TAILSCALE_INSTALL=true  允许使用 curl | sh 安装 Tailscale（不推荐）
   SHOW_FULL_TOKEN=true    显示完整 Token（默认仅脱敏显示）
 
@@ -771,7 +794,10 @@ main() {
     echo ""
     if [[ "$ENABLE_CONFIG_CENTER" == "true" ]]; then
       log_info "正在启动配置中心..."
-      if [[ -f "/root/.openclaw/workspace/config-center.sh" ]]; then
+      if [[ -f "$SCRIPT_DIR/config-center.sh" ]]; then
+        "$SCRIPT_DIR/config-center.sh" master start
+        log_success "配置中心已启动"
+      elif [[ -f "/root/.openclaw/workspace/config-center.sh" ]]; then
         /root/.openclaw/workspace/config-center.sh master start
         log_success "配置中心已启动"
       else
