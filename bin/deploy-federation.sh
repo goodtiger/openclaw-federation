@@ -268,6 +268,24 @@ resolve_brew_bin() {
   return 1
 }
 
+start_tailscale_daemon() {
+  if command -v systemctl &> /dev/null; then
+    systemctl start tailscaled 2>/dev/null || true
+  elif command -v service &> /dev/null; then
+    service tailscaled start 2>/dev/null || true
+  fi
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local brew_bin
+    brew_bin=$(resolve_brew_bin || true)
+    if [[ -n "$brew_bin" && -n "${SUDO_USER:-}" ]]; then
+      sudo -u "$SUDO_USER" "$brew_bin" services start tailscale > /dev/null 2>&1 || true
+    elif [[ -n "$brew_bin" && $EUID -ne 0 ]]; then
+      "$brew_bin" services start tailscale > /dev/null 2>&1 || true
+    fi
+  fi
+}
+
 # 获取或生成 Token
 get_or_generate_token() {
   # 优先级: 环境变量 > 命令行参数 --token > 命令行参数 --token-file > 本地文件 > 生成新 Token
@@ -566,8 +584,21 @@ setup_tailscale() {
   fi
   
   if ! tailscale status &> /dev/null; then
-    log_info "启动 Tailscale，请在浏览器中完成登录..."
-    tailscale up
+    log_info "启动 Tailscale 服务..."
+    start_tailscale_daemon
+  fi
+
+  if ! tailscale status &> /dev/null; then
+    log_info "请在浏览器中完成 Tailscale 登录..."
+    if ! tailscale up; then
+      log_error "无法连接到 Tailscale 服务"
+      if [[ "$(uname -s)" == "Darwin" ]]; then
+        log_info "macOS 请先打开 Tailscale.app 并完成登录"
+      else
+        log_info "请确认 tailscaled 服务已启动"
+      fi
+      exit 1
+    fi
   else
     log_success "Tailscale 已登录"
   fi
