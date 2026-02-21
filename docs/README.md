@@ -111,6 +111,102 @@ sudo ./deploy-federation.sh worker \
 
 ---
 
+## 使用说明 / Usage
+
+**整体流程 / End-to-End Flow**
+1. 准备环境：安装 Tailscale、OpenClaw，并加入同一 Tailscale 网络  
+   Prepare prerequisites: install Tailscale and OpenClaw, join the same Tailscale network.
+2. 在一台机器部署 Master，并记录 Token 文件路径  
+   Deploy Master on one machine and record the Token file path.
+3. 在其他机器部署 Worker，使用 `--token-file` 指向同一 Token  
+   Deploy Workers on other machines using `--token-file` pointing to the same Token.
+4. 在 Master 上添加节点、验证连接、开始任务分发  
+   Add nodes on Master, verify connectivity, and start task delegation.
+
+**路径与权限 / Paths and Permissions**
+- Linux 默认 Token 文件：`/root/.openclaw/.federation-token`  
+  Default Token path on Linux: `/root/.openclaw/.federation-token`.
+- macOS 建议路径：`$HOME/.openclaw/.federation-token`  
+  Recommended on macOS: `$HOME/.openclaw/.federation-token`.
+- 可用 `TOKEN_FILE` 覆盖默认路径  
+  Override path via `TOKEN_FILE` environment variable.
+
+**示例：macOS Worker / Example: macOS Worker**
+```bash
+export TOKEN_FILE="$HOME/.openclaw/.federation-token"
+sudo ./deploy-federation.sh worker \
+  --master-ip 100.64.0.1 \
+  --token-file "$TOKEN_FILE" \
+  --node-name mac-worker
+```
+
+**节点管理 / Node Management**
+```bash
+# 列出节点 / List nodes
+./manage-federation.sh list
+
+# 查看状态 / Check status
+./manage-federation.sh status
+
+# 添加节点 / Add node
+./manage-federation.sh add worker1 100.64.0.2 "docker k8s"
+
+# 远程执行 / Remote exec
+./manage-federation.sh exec worker1 -- docker ps
+```
+
+**绑定模式 / Binding Mode**
+- 开放模式 `0.0.0.0`：便于本机调试，但需要防火墙  
+  Open mode `0.0.0.0`: easy local access, requires firewall.
+- 安全模式 Tailscale IP：仅 Tailscale 访问  
+  Secure mode Tailscale IP: Tailscale-only access.
+
+```bash
+# 查看绑定状态 / Show bind status
+./switch-bind-mode.sh status
+
+# 切换为安全模式 / Switch to secure
+./switch-bind-mode.sh to-tailscale
+```
+
+**配置中心 / Config Center**
+```bash
+# Master 启动 / Master start
+sudo ./config-center.sh master start
+
+# Worker 同步 / Worker sync
+sudo ./config-center.sh worker sync
+```
+
+**健康检查 / Health Check**
+```bash
+# 安装为服务 / Install service
+sudo ./health-check.sh install
+
+# 查看状态 / Show status
+./health-check.sh status
+```
+
+**任务共享 / Task Share**
+```bash
+# 初始化 / Init
+./task-share.sh init
+
+# 创建任务 / Create task
+./task-share.sh create "部署 Nginx" worker1 high "部署并验证访问"
+
+# 领取任务 / Claim task
+./task-share.sh claim worker1
+```
+
+**重复运行 / Re-run Safety**
+- 脚本可重复执行，已安装的软件不会重复安装  
+  Scripts are safe to re-run; installed software will not be reinstalled.
+- 如需强制安装，请先卸载或清理环境  
+  For a clean reinstall, remove the software manually first.
+
+---
+
 ## 详细部署
 
 ### 第一步：准备所有节点
