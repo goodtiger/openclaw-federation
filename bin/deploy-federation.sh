@@ -136,6 +136,7 @@ OpenClaw + Tailscale 联邦部署脚本（Token 共享版）
   FEDERATION_TOKEN        共享 Token（优先级高于 --token）
   TOKEN_FILE              Token 文件路径（默认: ~/.openclaw/.federation-token）
   OPENCLAW_HOME           OpenClaw 工作目录（默认: ~/.openclaw 或 sudo 用户家目录）
+  TAILSCALE_APT_BASE       Tailscale APT 源基础地址（默认: https://pkgs.tailscale.com/stable）
   ALLOW_UNSAFE_TAILSCALE_INSTALL=true  允许使用 curl | sh 安装 Tailscale（不推荐）
   SHOW_FULL_TOKEN=true    显示完整 Token（默认仅脱敏显示）
 
@@ -265,13 +266,32 @@ install_tailscale_ubuntu_repo() {
   local codename
   codename=$(ubuntu_codename) || return 1
 
+  local base="${TAILSCALE_APT_BASE:-https://pkgs.tailscale.com/stable}"
   log_info "添加 Tailscale 官方 APT 源: $codename"
   require_sudo || return 1
   $SUDO_CMD mkdir -p /usr/share/keyrings
-  curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${codename}.noarmor.gpg" \
-    | $SUDO_CMD tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
-  curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${codename}.tailscale-keyring.list" \
-    | $SUDO_CMD tee /etc/apt/sources.list.d/tailscale.list > /dev/null
+
+  local gpg_url="${base}/ubuntu/${codename}.noarmor.gpg"
+  local list_url="${base}/ubuntu/${codename}.tailscale-keyring.list"
+  local tmp_gpg
+  local tmp_list
+  tmp_gpg=$(mktemp)
+  tmp_list=$(mktemp)
+
+  if ! download_file "$gpg_url" "$tmp_gpg"; then
+    log_warn "无法下载 GPG key，可能被地区/网络限制"
+    log_info "可设置 TAILSCALE_APT_BASE 使用镜像，或配置 http_proxy/https_proxy"
+    return 1
+  fi
+  if ! download_file "$list_url" "$tmp_list"; then
+    log_warn "无法下载 APT 源列表，可能被地区/网络限制"
+    log_info "可设置 TAILSCALE_APT_BASE 使用镜像，或配置 http_proxy/https_proxy"
+    return 1
+  fi
+
+  $SUDO_CMD install -m 644 "$tmp_gpg" /usr/share/keyrings/tailscale-archive-keyring.gpg
+  $SUDO_CMD install -m 644 "$tmp_list" /etc/apt/sources.list.d/tailscale.list
+  rm -f "$tmp_gpg" "$tmp_list" 2>/dev/null || true
 
   $SUDO_CMD apt-get update -qq || true
   $SUDO_CMD apt-get install -y -qq tailscale
@@ -291,6 +311,19 @@ resolve_brew_bin() {
     return 0
   fi
   return 1
+}
+
+download_file() {
+  local url=$1
+  local out=$2
+  local http_code
+  http_code=$(curl -sS -w "%{http_code}" -o "$out" "$url" || echo "000")
+  if [[ "$http_code" != "200" ]]; then
+    log_error "下载失败 (HTTP $http_code): $url"
+    rm -f "$out" 2>/dev/null || true
+    return 1
+  fi
+  return 0
 }
 
 start_tailscale_daemon() {
