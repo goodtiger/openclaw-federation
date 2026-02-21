@@ -164,6 +164,45 @@ pkg_has_tailscale() {
   return 1
 }
 
+is_ubuntu() {
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    [[ "${ID:-}" == "ubuntu" ]]
+    return $?
+  fi
+  return 1
+}
+
+ubuntu_codename() {
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    if [[ -n "${VERSION_CODENAME:-}" ]]; then
+      echo "$VERSION_CODENAME"
+      return 0
+    fi
+    if [[ -n "${UBUNTU_CODENAME:-}" ]]; then
+      echo "$UBUNTU_CODENAME"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+install_tailscale_ubuntu_repo() {
+  local codename
+  codename=$(ubuntu_codename) || return 1
+
+  log_info "添加 Tailscale 官方 APT 源: $codename"
+  mkdir -p /usr/share/keyrings
+  curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${codename}.noarmor.gpg" \
+    | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
+  curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${codename}.tailscale-keyring.list" \
+    | tee /etc/apt/sources.list.d/tailscale.list > /dev/null
+
+  apt-get update -qq || true
+  apt-get install -y -qq tailscale
+}
+
 # 获取或生成 Token
 get_or_generate_token() {
   # 优先级: 环境变量 > 命令行参数 --token > 命令行参数 --token-file > 本地文件 > 生成新 Token
@@ -490,6 +529,12 @@ install_tailscale_safe() {
     apt-get update -qq || true
     if apt-get install -y -qq tailscale; then
       return 0
+    fi
+    if is_ubuntu; then
+      log_warn "APT 源中未找到 tailscale，尝试添加官方源..."
+      if install_tailscale_ubuntu_repo; then
+        return 0
+      fi
     fi
   elif command -v dnf &> /dev/null; then
     log_info "尝试使用 dnf 安装..."
