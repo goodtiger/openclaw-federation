@@ -118,6 +118,9 @@ OpenClaw + Tailscale 联邦部署脚本（Token 共享版）
   master    部署主控节点（VPS/公网服务器）
   worker    部署工作节点（家庭服务器/Mac/Pi）
 
+说明:
+  可在非 root 下运行，安装依赖或配置防火墙时会使用 sudo
+
 选项:
   --master-ip IP          主节点的 Tailscale IP（worker 必需）
   --node-name NAME        节点名称（如: home-server, mac-pc）
@@ -175,6 +178,27 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_highlight() { echo -e "${CYAN}$1${NC}"; }
+
+SUDO_CMD=""
+
+init_privilege() {
+  if [[ $EUID -ne 0 ]]; then
+    if command -v sudo &> /dev/null; then
+      SUDO_CMD="sudo"
+      log_info "当前非 root，将在需要时使用 sudo"
+    else
+      log_warn "当前非 root 且未安装 sudo，部分操作可能失败"
+    fi
+  fi
+}
+
+require_sudo() {
+  if [[ $EUID -ne 0 && -z "$SUDO_CMD" ]]; then
+    log_error "需要 root 权限或 sudo 才能执行此操作"
+    return 1
+  fi
+  return 0
+}
 
 npm_has_package() {
   local pkg=$1
@@ -242,14 +266,15 @@ install_tailscale_ubuntu_repo() {
   codename=$(ubuntu_codename) || return 1
 
   log_info "添加 Tailscale 官方 APT 源: $codename"
-  mkdir -p /usr/share/keyrings
+  require_sudo || return 1
+  $SUDO_CMD mkdir -p /usr/share/keyrings
   curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${codename}.noarmor.gpg" \
-    | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
+    | $SUDO_CMD tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
   curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${codename}.tailscale-keyring.list" \
-    | tee /etc/apt/sources.list.d/tailscale.list > /dev/null
+    | $SUDO_CMD tee /etc/apt/sources.list.d/tailscale.list > /dev/null
 
-  apt-get update -qq || true
-  apt-get install -y -qq tailscale
+  $SUDO_CMD apt-get update -qq || true
+  $SUDO_CMD apt-get install -y -qq tailscale
 }
 
 resolve_brew_bin() {
@@ -270,9 +295,11 @@ resolve_brew_bin() {
 
 start_tailscale_daemon() {
   if command -v systemctl &> /dev/null; then
-    systemctl start tailscaled 2>/dev/null || true
+    require_sudo || return 1
+    $SUDO_CMD systemctl start tailscaled 2>/dev/null || true
   elif command -v service &> /dev/null; then
-    service tailscaled start 2>/dev/null || true
+    require_sudo || return 1
+    $SUDO_CMD service tailscaled start 2>/dev/null || true
   fi
 
   if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -408,11 +435,25 @@ check_jq() {
   if ! command -v jq &> /dev/null; then
     log_info "安装 jq（用于安全合并配置）..."
     if command -v apt-get &> /dev/null; then
-      apt-get update -qq && apt-get install -y -qq jq
+      require_sudo || return 1
+      $SUDO_CMD apt-get update -qq && $SUDO_CMD apt-get install -y -qq jq
     elif command -v yum &> /dev/null; then
-      yum install -y jq
+      require_sudo || return 1
+      $SUDO_CMD yum install -y jq
+    elif command -v dnf &> /dev/null; then
+      require_sudo || return 1
+      $SUDO_CMD dnf install -y jq
     elif command -v brew &> /dev/null; then
-      brew install jq
+      local brew_bin
+      brew_bin=$(resolve_brew_bin || true)
+      if [[ -n "$brew_bin" && -n "${SUDO_USER:-}" && $EUID -eq 0 ]]; then
+        sudo -u "$SUDO_USER" "$brew_bin" install jq
+      elif [[ -n "$brew_bin" ]]; then
+        "$brew_bin" install jq
+      else
+        log_warn "无法自动安装 jq，将使用基础配置模式"
+        return 1
+      fi
     else
       log_warn "无法自动安装 jq，将使用基础配置模式"
       return 1
@@ -498,7 +539,7 @@ create_basic_config() {
   },
   "agents": {
     "defaults": {
-      "workspace": "/root/.openclaw/workspace",
+      "workspace": "__OPENCLAW_HOME__/workspace",
       "compaction": { "mode": "safeguard" }
     }
   },
@@ -507,6 +548,11 @@ create_basic_config() {
   }
 }
 EOF
+
+  # 替换占位符，避免转义问题
+  sed -i.bak "s#__OPENCLAW_HOME__#$OPENCLAW_HOME#g" "$CONFIG_FILE" 2>/dev/null || \
+    perl -pi -e "s#__OPENCLAW_HOME__#$OPENCLAW_HOME#g" "$CONFIG_FILE"
+  rm -f "${CONFIG_FILE}.bak" 2>/dev/null || true
 }
 
 # 配置 Gateway
@@ -547,14 +593,6 @@ configure_gateway_safe() {
   fi
 }
 
-# 检查 root 权限
-check_root() {
-  if [[ $EUID -ne 0 ]]; then
-    log_error "请使用 root 权限运行 (sudo)"
-    exit 1
-  fi
-}
-
 # 检测操作系统
 detect_os() {
   if [[ -f /etc/os-release ]]; then
@@ -590,7 +628,12 @@ setup_tailscale() {
 
   if ! tailscale status &> /dev/null; then
     log_info "请在浏览器中完成 Tailscale 登录..."
-    if ! tailscale up; then
+    local ts_cmd="tailscale up"
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+      require_sudo || { log_error "无法执行 tailscale up"; exit 1; }
+      ts_cmd="$SUDO_CMD tailscale up"
+    fi
+    if ! eval "$ts_cmd"; then
       log_error "无法连接到 Tailscale 服务"
       if [[ "$(uname -s)" == "Darwin" ]]; then
         log_info "macOS 请先打开 Tailscale.app 并完成登录"
@@ -624,8 +667,9 @@ install_tailscale_safe() {
 
   if command -v apt-get &> /dev/null; then
     log_info "尝试使用 apt 安装..."
-    apt-get update -qq || true
-    if apt-get install -y -qq tailscale; then
+    require_sudo || return 1
+    $SUDO_CMD apt-get update -qq || true
+    if $SUDO_CMD apt-get install -y -qq tailscale; then
       return 0
     fi
     if is_ubuntu; then
@@ -636,12 +680,14 @@ install_tailscale_safe() {
     fi
   elif command -v dnf &> /dev/null; then
     log_info "尝试使用 dnf 安装..."
-    if dnf install -y tailscale; then
+    require_sudo || return 1
+    if $SUDO_CMD dnf install -y tailscale; then
       return 0
     fi
   elif command -v yum &> /dev/null; then
     log_info "尝试使用 yum 安装..."
-    if yum install -y tailscale; then
+    require_sudo || return 1
+    if $SUDO_CMD yum install -y tailscale; then
       return 0
     fi
   else
@@ -684,11 +730,23 @@ check_openclaw() {
   
   log_info "安装 OpenClaw..."
   if ! command -v npm &> /dev/null; then
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y nodejs
+    require_sudo || { log_error "需要 sudo 安装 Node.js"; exit 1; }
+    curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO_CMD bash -
+    $SUDO_CMD apt-get install -y nodejs
   fi
-  npm install -g openclaw
-  log_success "OpenClaw 安装完成"
+  if npm install -g openclaw; then
+    log_success "OpenClaw 安装完成"
+    return 0
+  fi
+  if [[ -n "$SUDO_CMD" ]]; then
+    log_warn "尝试使用 sudo 安装 OpenClaw..."
+    if $SUDO_CMD npm install -g openclaw; then
+      log_success "OpenClaw 安装完成"
+      return 0
+    fi
+  fi
+  log_error "OpenClaw 安装失败，请检查 npm 全局目录权限或使用 sudo"
+  exit 1
 }
 
 # 启动 Gateway
@@ -727,10 +785,12 @@ install_skills() {
 open_firewall() {
   log_info "配置防火墙..."
   if command -v ufw &> /dev/null; then
-    ufw allow $GATEWAY_PORT/tcp 2>/dev/null || true
+    require_sudo || return 0
+    $SUDO_CMD ufw allow $GATEWAY_PORT/tcp 2>/dev/null || true
   elif command -v firewall-cmd &> /dev/null; then
-    firewall-cmd --permanent --add-port=$GATEWAY_PORT/tcp 2>/dev/null || true
-    firewall-cmd --reload 2>/dev/null || true
+    require_sudo || return 0
+    $SUDO_CMD firewall-cmd --permanent --add-port=$GATEWAY_PORT/tcp 2>/dev/null || true
+    $SUDO_CMD firewall-cmd --reload 2>/dev/null || true
   fi
 }
 
@@ -743,8 +803,9 @@ show_worker_info() {
   [[ -z "$node_name" ]] && node_name=$(hostname -s)
   
   local my_ip=$(tailscale ip -4 | head -1)
-  
-  cat > "/root/.openclaw/.node-info.json" << EOF
+
+  mkdir -p "$OPENCLAW_HOME"
+  cat > "$OPENCLAW_HOME/.node-info.json" << EOF
 {
   "name": "$node_name",
   "tailscale_ip": "$my_ip",
@@ -757,7 +818,7 @@ EOF
   log_success "工作节点配置完成！"
   echo ""
   log_highlight "=== 节点信息 ==="
-  cat "/root/.openclaw/.node-info.json"
+  cat "$OPENCLAW_HOME/.node-info.json"
   echo ""
   log_highlight "=== 在主节点执行以下命令添加此节点 ==="
   echo ""
@@ -792,7 +853,7 @@ main() {
   [[ -z "$ROLE" ]] && { show_help; exit 1; }
   [[ "$ROLE" != "master" && "$ROLE" != "worker" ]] && { log_error "无效角色"; exit 1; }
   
-  check_root
+  init_privilege
   detect_os
   
   # 获取 Token
