@@ -24,6 +24,27 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+to_http_url() {
+  local url=$1
+  if [[ "$url" == ws://* ]]; then
+    echo "http://${url#ws://}"
+    return 0
+  fi
+  if [[ "$url" == wss://* ]]; then
+    echo "https://${url#wss://}"
+    return 0
+  fi
+  echo "$url"
+}
+
+now_iso() {
+  if date -Iseconds >/dev/null 2>&1; then
+    date -Iseconds
+  else
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+  fi
+}
+
 # 初始化配置目录
 init_config_center() {
   mkdir -p "$CONFIG_DIR"
@@ -94,13 +115,29 @@ master_update_config() {
   local key=$1
   local value=$2
   
+  if [[ -z "$key" || -z "$value" ]]; then
+    log_error "用法: config-center.sh master update <KEY> <VALUE>"
+    exit 1
+  fi
+
   log_info "更新配置: $key = $value"
   
+  init_config_center
+
   # 更新配置并更新时间戳
   local tmp_file=$(mktemp)
-  jq --arg key "$key" --arg value "$value" \
-     '.[$key] = $value | .updated_at = now' \
-     "$MASTER_CONFIG" > "$tmp_file"
+  local ts
+  ts=$(now_iso)
+
+  if echo "$value" | jq -e . >/dev/null 2>&1; then
+    jq --arg key "$key" --argjson value "$value" --arg ts "$ts" \
+       'setpath($key | split("."); $value) | .updated_at = $ts' \
+       "$MASTER_CONFIG" > "$tmp_file"
+  else
+    jq --arg key "$key" --arg value "$value" --arg ts "$ts" \
+       'setpath($key | split("."); $value) | .updated_at = $ts' \
+       "$MASTER_CONFIG" > "$tmp_file"
+  fi
   mv "$tmp_file" "$MASTER_CONFIG"
   
   log_success "配置已更新"
@@ -125,11 +162,14 @@ notify_workers_sync() {
     [[ -z "$name" || "$name" == "null" ]] && continue
     
     # 异步发送通知（不等待响应）
+    local http_base
+    http_base=$(to_http_url "$url")
+
     (
       curl -s -X POST \
         --connect-timeout 3 \
         --max-time 3 \
-        "${url/websocket/http}/api/config/notify" \
+        "${http_base%/}/api/config/notify" \
         > /dev/null 2>&1 || true
     ) &
   done < <(echo "$nodes" | jq -c '.[]')
@@ -164,7 +204,9 @@ master_export_config() {
 # Worker: 从 Master 同步配置
 worker_sync_config() {
   log_info "从 Master 同步配置..."
-  
+
+  mkdir -p "$CONFIG_DIR"
+
   # 读取 Master IP
   local master_ip
   if [[ -f "/root/.openclaw/.federation-config.json" ]]; then
@@ -226,13 +268,17 @@ merge_remote_config() {
   cp "$local_config" "$local_config.backup.$(date +%Y%m%d_%H%M%S)"
   
   # 提取需要同步的字段
-  local channels=$(echo "$remote_config" | jq '.channels // empty')
-  local agents=$(echo "$remote_config" | jq '.agents // empty')
+  local channels
+  channels=$(echo "$remote_config" | jq -c '.channels // {}')
+  local agents
+  agents=$(echo "$remote_config" | jq -c '.agents // {}')
   
   # 合并到本地配置
   local tmp_file=$(mktemp)
-  jq --argjson channels "$channels" --argjson agents "$agents" \
-     '.channels = $channels | .agents = $agents | .meta.config_synced_at = now' \
+  local ts
+  ts=$(now_iso)
+  jq --argjson channels "$channels" --argjson agents "$agents" --arg ts "$ts" \
+     '.channels = $channels | .agents = $agents | .meta.config_synced_at = $ts' \
      "$local_config" > "$tmp_file"
   mv "$tmp_file" "$local_config"
   

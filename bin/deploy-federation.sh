@@ -102,6 +102,8 @@ OpenClaw + Tailscale 联邦部署脚本（Token 共享版）
 环境变量:
   FEDERATION_TOKEN        共享 Token（优先级高于 --token）
   TOKEN_FILE              Token 文件路径（默认: ~/.openclaw/.federation-token）
+  ALLOW_UNSAFE_TAILSCALE_INSTALL=true  允许使用 curl | sh 安装 Tailscale（不推荐）
+  SHOW_FULL_TOKEN=true    显示完整 Token（默认仅脱敏显示）
 
 Token 共享方式:
 
@@ -142,6 +144,25 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_highlight() { echo -e "${CYAN}$1${NC}"; }
+
+npm_has_package() {
+  local pkg=$1
+  command -v npm &> /dev/null || return 1
+  npm list -g --depth=0 "$pkg" > /dev/null 2>&1
+}
+
+pkg_has_tailscale() {
+  if command -v dpkg &> /dev/null; then
+    dpkg -s tailscale > /dev/null 2>&1 && return 0
+  fi
+  if command -v rpm &> /dev/null; then
+    rpm -q tailscale > /dev/null 2>&1 && return 0
+  fi
+  if command -v brew &> /dev/null; then
+    brew list --formula tailscale > /dev/null 2>&1 && return 0
+  fi
+  return 1
+}
 
 # 获取或生成 Token
 get_or_generate_token() {
@@ -222,11 +243,18 @@ show_token_export_help() {
   log_highlight "=== Token 共享方式（在其他机器上使用） ==="
   echo "═══════════════════════════════════════════════════════════"
   echo ""
+
+  local token_display
+  if [[ "${SHOW_FULL_TOKEN:-false}" == "true" ]]; then
+    token_display="$TOKEN"
+  else
+    token_display="${TOKEN:0:4}...${TOKEN: -4}"
+  fi
   
-  log_info "方式 1: 复制粘贴（最简单）"
-  echo "  Token: ${YELLOW}$TOKEN${NC}"
+  log_info "方式 1: 复制 Token 文件内容"
+  echo "  Token: ${YELLOW}$token_display${NC}"
   echo "  在其他机器上运行:"
-  echo -e "  ${GREEN}./deploy.sh worker --master-ip $TAILSCALE_IP --token \"$TOKEN\"${NC}"
+  echo -e "  ${GREEN}./deploy.sh worker --master-ip $TAILSCALE_IP --token-file $TOKEN_FILE${NC}"
   echo ""
   
   log_info "方式 2: SSH 传输 Token 文件"
@@ -242,10 +270,13 @@ show_token_export_help() {
   
   log_info "方式 4: 环境变量"
   echo -e "  在工作节点上:"
-  echo -e "  ${CYAN}export FEDERATION_TOKEN=\"$TOKEN\"${NC}"
+  echo -e "  ${CYAN}export FEDERATION_TOKEN=\"\$(cat $TOKEN_FILE)\"${NC}"
   echo -e "  ${GREEN}./deploy.sh worker --master-ip $TAILSCALE_IP${NC}"
   echo ""
   
+  if [[ "${SHOW_FULL_TOKEN:-false}" != "true" ]]; then
+    log_info "提示: 如需显示完整 Token，可临时设置 SHOW_FULL_TOKEN=true 再运行部署脚本"
+  fi
   log_warn "重要: 请保存好这个 Token，所有工作节点需要使用相同的 Token！"
   echo ""
 }
@@ -413,8 +444,17 @@ setup_tailscale() {
   log_info "检查 Tailscale..."
   
   if ! command -v tailscale &> /dev/null; then
-    log_info "安装 Tailscale..."
-    curl -fsSL https://tailscale.com/install.sh | sh
+    log_info "安装 Tailscale（安全模式，优先包管理器）..."
+    if ! install_tailscale_safe; then
+      if [[ "${ALLOW_UNSAFE_TAILSCALE_INSTALL:-false}" == "true" ]]; then
+        log_warn "安全安装失败，使用不安全模式（curl | sh）"
+        curl -fsSL https://tailscale.com/install.sh | sh
+      else
+        log_error "无法通过包管理器安装 Tailscale"
+        log_info "请手动安装后重试，或设置 ALLOW_UNSAFE_TAILSCALE_INSTALL=true 允许使用 curl | sh"
+        exit 1
+      fi
+    fi
   else
     log_success "Tailscale 已安装"
   fi
@@ -434,12 +474,55 @@ setup_tailscale() {
   log_success "Tailscale IP: $TAILSCALE_IP"
 }
 
+install_tailscale_safe() {
+  if command -v tailscale &> /dev/null; then
+    return 0
+  fi
+
+  if pkg_has_tailscale; then
+    log_warn "检测到 Tailscale 已通过包管理器安装，但命令不可用"
+    log_warn "请检查 PATH 或重新登录后再试"
+    return 0
+  fi
+
+  if command -v apt-get &> /dev/null; then
+    log_info "尝试使用 apt 安装..."
+    apt-get update -qq || true
+    if apt-get install -y -qq tailscale; then
+      return 0
+    fi
+  elif command -v dnf &> /dev/null; then
+    log_info "尝试使用 dnf 安装..."
+    if dnf install -y tailscale; then
+      return 0
+    fi
+  elif command -v yum &> /dev/null; then
+    log_info "尝试使用 yum 安装..."
+    if yum install -y tailscale; then
+      return 0
+    fi
+  elif command -v brew &> /dev/null; then
+    log_info "尝试使用 brew 安装..."
+    if brew install tailscale; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 # 检查 OpenClaw
 check_openclaw() {
   log_info "检查 OpenClaw..."
   
   if command -v openclaw &> /dev/null; then
     log_success "OpenClaw 已安装"
+    return 0
+  fi
+
+  if npm_has_package "openclaw"; then
+    log_success "OpenClaw 已安装（npm 全局）"
+    log_warn "openclaw 命令未在 PATH 中，跳过重复安装"
     return 0
   fi
   

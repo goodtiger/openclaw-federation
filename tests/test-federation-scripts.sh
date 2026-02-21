@@ -16,6 +16,9 @@ NC='\033[0m'
 # 测试模式标志
 DRY_RUN=true
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPTS_DIR="$ROOT_DIR/bin"
+
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════════════════════════╗"
 echo "║     OpenClaw + Tailscale 联邦部署脚本 - 测试模式          ║"
@@ -41,14 +44,14 @@ test_syntax() {
   echo ""
   echo -e "${BLUE}=== 测试 1: 脚本语法检查 ===${NC}"
   
-  if bash -n /root/.openclaw/workspace/deploy-openclaw-federation.sh; then
-    log_success "deploy-openclaw-federation.sh 语法正确"
+  if bash -n "$SCRIPTS_DIR/deploy-federation.sh"; then
+    log_success "deploy-federation.sh 语法正确"
   else
-    log_error "deploy-openclaw-federation.sh 语法错误"
+    log_error "deploy-federation.sh 语法错误"
     return 1
   fi
   
-  if bash -n /root/.openclaw/workspace/manage-federation.sh; then
+  if bash -n "$SCRIPTS_DIR/manage-federation.sh"; then
     log_success "manage-federation.sh 语法正确"
   else
     log_error "manage-federation.sh 语法错误"
@@ -238,10 +241,10 @@ main() {
   echo "实际部署命令示例:"
   echo ""
   echo "1. 主节点部署:"
-  echo -e "   ${BLUE}sudo /root/.openclaw/workspace/deploy-openclaw-federation.sh master${NC}"
+  echo -e "   ${BLUE}sudo ./bin/deploy-federation.sh master${NC}"
   echo ""
   echo "2. 工作节点部署:"
-  echo -e "   ${BLUE}sudo /root/.openclaw/workspace/deploy-openclaw-federation.sh worker --master-ip 100.64.0.1 --node-name home-server --skills 'docker k8s'${NC}"
+  echo -e "   ${BLUE}sudo ./bin/deploy-federation.sh worker --master-ip 100.64.0.1 --node-name home-server --skills 'docker k8s'${NC}"
   echo ""
 }
 

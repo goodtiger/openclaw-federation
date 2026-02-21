@@ -24,7 +24,7 @@
 
 ### 1. 准备
 
-- 所有机器安装好 Linux/macOS
+- Master/Worker 可为 Linux/macOS/Raspberry Pi 等平台（任意组合）
 - 确保能访问互联网
 - 准备一个 Tailscale 账号（免费）
 
@@ -41,9 +41,9 @@ sudo ./deploy.sh master
 
 部署完成后会显示：
 - Tailscale IP（如 100.64.0.1）
-- 共享 Token（其他机器需要）
+- Token 文件路径（默认：/root/.openclaw/.federation-token）
 
-**保存好这个 Token！**
+**保存好这个 Token 文件！**
 
 ### 3. 部署工作节点
 
@@ -54,12 +54,15 @@ sudo ./deploy.sh master
 curl -fsSL -o deploy.sh https://your-server/deploy-openclaw-federation.sh
 chmod +x deploy.sh
 
-# 部署工作节点（替换 IP 和 Token）
+# 部署工作节点（替换 IP，Token 建议用文件）
 sudo ./deploy.sh worker \
   --master-ip 100.64.0.1 \
   --node-name home-server \
-  --skills "docker k8s tmux"
+  --skills "docker k8s tmux" \
+  --token-file /root/.openclaw/.federation-token
 ```
+
+提示：如果你的系统没有 `/root`（如 macOS），可通过设置 `TOKEN_FILE` 指定 Token 文件路径。
 
 参数说明：
 - `--master-ip`: 主节点的 Tailscale IP
@@ -166,13 +169,23 @@ openclaw nodes invoke pi-device -- python3 /home/pi/read_sensor.py
 ### 安装 Tailscale
 
 ```bash
-# Linux
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
+# 推荐：使用系统包管理器（更安全）
+# Ubuntu/Debian
+sudo apt-get update -y
+sudo apt-get install -y tailscale
+
+# CentOS/RHEL/Fedora
+sudo yum install -y tailscale
+# 或: sudo dnf install -y tailscale
 
 # macOS
 brew install tailscale
+
+# 启动并登录
 sudo tailscale up
+
+# 如果包管理器不可用，可临时允许脚本安装（不推荐）
+# ALLOW_UNSAFE_TAILSCALE_INSTALL=true sudo ./deploy.sh master
 ```
 
 ### 配置 OpenClaw

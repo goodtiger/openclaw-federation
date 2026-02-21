@@ -20,6 +20,15 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_highlight() { echo -e "${CYAN}$1${NC}"; }
 
+get_mtime() {
+  local file=$1
+  if stat -c %y "$file" >/dev/null 2>&1; then
+    stat -c %y "$file" | cut -d'.' -f1
+  else
+    stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$file" 2>/dev/null || echo ""
+  fi
+}
+
 show_help() {
   cat << 'EOF'
 OpenClaw 配置管理工具
@@ -97,7 +106,7 @@ list_backups() {
   local i=1
   for backup in "${backups[@]}"; do
     local filename=$(basename "$backup")
-    local mtime=$(stat -c %y "$backup" 2>/dev/null | cut -d'.' -f1)
+    local mtime=$(get_mtime "$backup")
     local size=$(du -h "$backup" 2>/dev/null | cut -f1)
     printf "%-5s %-40s %-20s %s\n" "$i" "$filename" "$mtime" "$size"
     ((i++))

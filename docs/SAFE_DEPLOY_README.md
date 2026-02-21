@@ -15,6 +15,14 @@
 
 ---
 
+## 🧩 平台支持
+
+- Master/Worker 可为 Linux/macOS/Raspberry Pi 等平台（任意组合）
+- 脚本为 Bash 编写，暂不支持 Windows 原生环境
+- macOS 建议预先安装 Homebrew，用于依赖安装（如 `jq`）
+
+---
+
 ## 📋 部署前检查清单
 
 ### 1. 备份当前配置（强烈推荐）

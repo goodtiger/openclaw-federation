@@ -103,7 +103,7 @@ switch_to_all_interfaces() {
   echo "  ✅ 通过内网 IP 访问"
   echo "  ✅ 通过 Tailscale IP 访问（Master 仍可管理）"
   echo ""
-  warn "⚠️  注意: 请确保防火墙已配置，避免暴露在公网!"
+  log_warn "⚠️  注意: 请确保防火墙已配置，避免暴露在公网!"
   echo ""
 }
 
@@ -147,7 +147,7 @@ switch_to_tailscale() {
   echo "  ✅ 仅可通过 Tailscale 网络访问"
   echo "  ✅ 天然安全，无需防火墙"
   echo ""
-  warn "注意:"
+  log_warn "注意:"
   echo "  ❌ 无法通过 127.0.0.1 访问"
   echo "  ❌ 内网其他机器无法直接访问"
   echo ""

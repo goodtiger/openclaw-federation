@@ -10,6 +10,9 @@ set -e
 TEST_DIR="/tmp/openclaw-federation-test-$$"
 mkdir -p "$TEST_DIR"
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPTS_DIR="$ROOT_DIR/bin"
+
 echo "╔════════════════════════════════════════════════════════════╗"
 echo "║     OpenClaw 联邦部署脚本 - 沙盒测试                       ║"
 echo "║     Sandbox Test - No system changes will be made         ║"
@@ -51,8 +54,8 @@ test_syntax() {
   echo "测试 1: 脚本语法检查"
   echo "═══════════════════════════════════════════════════════════"
   
-  for script in deploy-federation-safe.sh config-manager.sh manage-federation.sh; do
-    if bash -n "/root/.openclaw/workspace/$script" 2>/dev/null; then
+  for script in deploy-federation.sh config-manager.sh manage-federation.sh; do
+    if bash -n "$SCRIPTS_DIR/$script" 2>/dev/null; then
       pass "$script 语法正确"
     else
       fail "$script 语法错误"

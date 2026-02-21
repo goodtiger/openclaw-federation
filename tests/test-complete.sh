@@ -7,6 +7,9 @@
 TEST_ROOT="/tmp/openclaw-complete-test-$$"
 mkdir -p "$TEST_ROOT"
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPTS_DIR="$ROOT_DIR/bin"
+
 echo "╔══════════════════════════════════════════════════════════════════════╗"
 echo "║                                                                      ║"
 echo "║     OpenClaw 联邦部署 - 完整沙盒测试                                 ║"
@@ -138,7 +141,7 @@ pass "模拟环境创建完成"
 section "【测试 1】脚本语法检查"
 
 for script in deploy-federation.sh health-check.sh auto-register.sh config-center.sh switch-bind-mode.sh config-manager.sh manage-federation.sh; do
-  if bash -n "/root/.openclaw/workspace/$script" 2>/dev/null; then
+  if bash -n "$SCRIPTS_DIR/$script" 2>/dev/null; then
     pass "$script 语法正确"
   else
     fail "$script 语法错误"

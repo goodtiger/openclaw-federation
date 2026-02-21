@@ -24,6 +24,23 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1" | tee -a "$LOG_FILE"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$LOG_FILE"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"; }
 
+now_iso() {
+  if date -Iseconds >/dev/null 2>&1; then
+    date -Iseconds
+  else
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+  fi
+}
+
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/}
+  echo "$s"
+}
+
 # 初始化日志目录
 init() {
   mkdir -p "$(dirname "$LOG_FILE")"
@@ -57,6 +74,19 @@ EOF
 }
 
 # 加载配置
+to_http_url() {
+  local url=$1
+  if [[ "$url" == ws://* ]]; then
+    echo "http://${url#ws://}"
+    return 0
+  fi
+  if [[ "$url" == wss://* ]]; then
+    echo "https://${url#wss://}"
+    return 0
+  fi
+  echo "$url"
+}
+
 check_node_health() {
   local node_name=$1
   local node_url=$2
@@ -66,11 +96,14 @@ check_node_health() {
   local response
   local http_code
   
+  local http_base
+  http_base=$(to_http_url "$node_url")
+
   response=$(curl -s -o /dev/null -w "%{http_code}" \
     --connect-timeout "$TIMEOUT" \
     --max-time "$TIMEOUT" \
     -H "Authorization: Bearer $token" \
-    "${node_url/websocket/http}/health" 2>/dev/null || echo "000")
+    "${http_base%/}/health" 2>/dev/null || echo "000")
   
   if [[ "$response" == "200" ]]; then
     echo "healthy"
@@ -122,12 +155,12 @@ health_check_all() {
     if [[ "$health_result" == "healthy" ]]; then
       log_success "  $name: 健康"
       ((healthy_count++))
-      results+=("{\"name\":\"$name\",\"status\":\"healthy\",\"timestamp\":\"$(date -Iseconds)\"}")
+      results+=("{\"name\":\"$name\",\"status\":\"healthy\",\"timestamp\":\"$(now_iso)\"}")
     else
       local error_code="${health_result#unhealthy:}"
       log_error "  $name: 不健康 (HTTP $error_code)"
       ((unhealthy_count++))
-      results+=("{\"name\":\"$name\",\"status\":\"unhealthy\",\"error\":\"$error_code\",\"timestamp\":\"$(date -Iseconds)\"}")
+      results+=("{\"name\":\"$name\",\"status\":\"unhealthy\",\"error\":\"$error_code\",\"timestamp\":\"$(now_iso)\"}")
       
       # 发送告警
       send_alert "$name" "$error_code"
@@ -143,7 +176,7 @@ health_check_all() {
   # 保存状态
   local status_json
   status_json=$(printf '[%s]' "$(IFS=,; echo "${results[*]}")")
-  echo "{\"timestamp\":\"$(date -Iseconds)\",\"total\":$((healthy_count + unhealthy_count)),\"healthy\":$healthy_count,\"unhealthy\":$unhealthy_count,\"nodes\":$status_json}" > "$STATUS_FILE"
+  echo "{\"timestamp\":\"$(now_iso)\",\"total\":$((healthy_count + unhealthy_count)),\"healthy\":$healthy_count,\"unhealthy\":$unhealthy_count,\"nodes\":$status_json}" > "$STATUS_FILE"
   
   log_info "检查完成: $healthy_count 健康, $unhealthy_count 不健康"
   echo ""
@@ -156,11 +189,13 @@ send_alert() {
   
   [[ -z "$ALERT_WEBHOOK" ]] && return 0
   
-  local message="⚠️ OpenClaw 联邦节点告警\n节点: $node_name\n错误: HTTP $error_code\n时间: $(date '+%Y-%m-%d %H:%M:%S')"
-  
+  local message="OpenClaw 联邦节点告警\n节点: $node_name\n错误: HTTP $error_code\n时间: $(now_iso)"
+  local payload
+  payload=$(json_escape "$message")
+
   curl -s -X POST \
     -H "Content-Type: application/json" \
-    -d "{\"text\":\"$message\"}" \
+    -d "{\"text\":\"$payload\"}" \
     "$ALERT_WEBHOOK" > /dev/null 2>&1 || true
 }
 

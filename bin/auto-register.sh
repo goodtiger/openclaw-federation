@@ -23,6 +23,14 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+now_iso() {
+  if date -Iseconds >/dev/null 2>&1; then
+    date -Iseconds
+  else
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+  fi
+}
+
 # 获取本机信息
 gather_node_info() {
   # 节点名称
@@ -62,7 +70,7 @@ gather_node_info() {
     "os": "$os",
     "arch": "$arch"
   },
-  "registered_at": "$(date -Iseconds)"
+  "registered_at": "$(now_iso)"
 }
 EOF
   
@@ -171,7 +179,7 @@ save_config() {
   cat > "$CONFIG_FILE" << EOF
 {
   "master_ip": "$master_ip",
-  "registered_at": "$(date -Iseconds)",
+  "registered_at": "$(now_iso)",
   "auto_register": true
 }
 EOF

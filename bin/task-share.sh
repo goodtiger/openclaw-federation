@@ -28,13 +28,33 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_highlight() { echo -e "${CYAN}$1${NC}"; }
 
+now_iso() {
+  if date -Iseconds >/dev/null 2>&1; then
+    date -Iseconds
+  else
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+  fi
+}
+
+date_days_ago() {
+  local days=$1
+  if [[ -z "$days" || ! "$days" =~ ^[0-9]+$ ]]; then
+    days=7
+  fi
+  if date -d "$days days ago" +%Y-%m-%d >/dev/null 2>&1; then
+    date -d "$days days ago" +%Y-%m-%d
+  else
+    date -v -"${days}"d +%Y-%m-%d
+  fi
+}
+
 # 初始化任务系统
 init() {
   mkdir -p "$QUEUE_DIR" "$ACTIVE_DIR" "$DONE_DIR" "$ARCHIVE_DIR"
   
   # 创建任务索引文件
   if [[ ! -f "$TASKS_DIR/index.json" ]]; then
-    echo '{"tasks": [], "last_update": "'$(date -Iseconds)'"}' > "$TASKS_DIR/index.json"
+    echo '{"tasks": [], "last_update": "'$(now_iso)'"}' > "$TASKS_DIR/index.json"
   fi
   
   log_success "任务共享系统初始化完成"
@@ -72,8 +92,8 @@ create_task() {
   "priority": "$priority",
   "assignee": "$assignee",
   "from": "$from_node",
-  "created_at": "$(date -Iseconds)",
-  "updated_at": "$(date -Iseconds)",
+  "created_at": "$(now_iso)",
+  "updated_at": "$(now_iso)",
   "started_at": null,
   "completed_at": null,
   "result": null,
@@ -123,17 +143,27 @@ claim_task() {
   
   local task_id=$(basename "$task_file" .json)
   local active_file="$ACTIVE_DIR/$task_id.json"
-  
+
+  # 原子领取：先移动到 active，避免并发重复领取
+  if ! mv "$task_file" "$active_file" 2>/dev/null; then
+    log_warn "任务已被领取，请重试"
+    return 1
+  fi
+
   # 更新任务状态
-  jq --arg node "$node_name" --arg time "$(date -Iseconds)" \
+  if ! jq --arg node "$node_name" --arg time "$(now_iso)" \
      '.status = "active" | 
       .assignee = $node | 
       .started_at = $time | 
       .updated_at = $time |
       .logs += [{"time": $time, "message": "任务被 " + $node + " 领取"}]' \
-     "$task_file" > "$active_file"
-  
-  rm "$task_file"
+     "$active_file" > "${active_file}.tmp"; then
+    log_error "更新任务状态失败"
+    mv "$active_file" "$task_file" 2>/dev/null || true
+    return 1
+  fi
+
+  mv "${active_file}.tmp" "$active_file"
   update_index
   
   log_success "任务已领取: $task_id"
@@ -162,7 +192,7 @@ update_progress() {
     fi
   fi
   
-  jq --arg prog "$progress" --arg msg "$message" --arg node "$node_name" --arg time "$(date -Iseconds)" \
+  jq --arg prog "$progress" --arg msg "$message" --arg node "$node_name" --arg time "$(now_iso)" \
      '.progress = ($prog | tonumber) | 
       .updated_at = $time |
       .logs += [{"time": $time, "node": $node, "progress": ($prog | tonumber), "message": $msg}]' \
@@ -193,7 +223,7 @@ complete_task() {
   
   local done_file="$DONE_DIR/$task_id.json"
   
-  jq --arg result "$result" --arg status "$status" --arg node "$node_name" --arg time "$(date -Iseconds)" \
+  jq --arg result "$result" --arg status "$status" --arg node "$node_name" --arg time "$(now_iso)" \
      '.status = $status | 
       .result = $result |
       .completed_at = $time |
@@ -308,7 +338,7 @@ update_index() {
   done
   
   # 更新索引
-  echo "{\"tasks\": $tasks, \"last_update\": \"$(date -Iseconds)\"}" | jq '.' > "$index_file"
+  echo "{\"tasks\": $tasks, \"last_update\": \"$(now_iso)\"}" | jq '.' > "$index_file"
 }
 
 # 获取统计信息
@@ -331,7 +361,8 @@ stats() {
 # 清理旧任务
 cleanup() {
   local days="${1:-7}"
-  local before_date=$(date -d "$days days ago" +%Y-%m-%d)
+  local before_date
+  before_date=$(date_days_ago "$days")
   
   log_info "清理 $days 天前的已完成任务..."
   

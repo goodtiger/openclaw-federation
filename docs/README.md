@@ -90,7 +90,8 @@ OpenClaw 联邦部署允许你将多台运行 OpenClaw 的机器组成一个集�
 
 - 所有机器已安装 OpenClaw
 - 所有机器已加入同一个 Tailscale 网络
-- 有 root/sudo 权限
+- Master/Worker 可为 Linux/macOS/Raspberry Pi 等平台（任意组合）
+- 有 root/sudo 权限（macOS 亦可使用 sudo）
 
 ### 一键部署
 
@@ -98,13 +99,15 @@ OpenClaw 联邦部署允许你将多台运行 OpenClaw 的机器组成一个集�
 # 1. 在 Master 节点执行
 sudo ./deploy-federation.sh master --bind-tailscale
 
-# 2. 记录显示的 Token
+# 2. 记录 Token 文件路径（默认: /root/.openclaw/.federation-token）
 
 # 3. 在 Worker 节点执行
 sudo ./deploy-federation.sh worker \
   --master-ip 100.64.0.1 \
-  --token "复制Master显示的Token"
+  --token-file /root/.openclaw/.federation-token
 ```
+
+提示：如果你的系统没有 `/root`（如 macOS），可以先设置 `TOKEN_FILE` 指定 Token 文件路径。
 
 ---
 
@@ -115,13 +118,23 @@ sudo ./deploy-federation.sh worker \
 #### 安装 Tailscale（所有节点）
 
 ```bash
-# Linux
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
+# 推荐：使用系统包管理器（更安全）
+# Ubuntu/Debian
+sudo apt-get update -y
+sudo apt-get install -y tailscale
+
+# CentOS/RHEL/Fedora
+sudo yum install -y tailscale
+# 或: sudo dnf install -y tailscale
 
 # macOS
 brew install tailscale
+
+# 启动并登录
 sudo tailscale up
+
+# 如果包管理器不可用，可临时允许脚本安装（不推荐）
+# ALLOW_UNSAFE_TAILSCALE_INSTALL=true sudo ./deploy-federation.sh master
 
 # 验证连接
 tailscale status
@@ -131,12 +144,16 @@ tailscale ip -4
 #### 安装 OpenClaw（所有节点）
 
 ```bash
-# 安装 Node.js
+# 安装 Node.js（Linux 示例）
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt-get install -y nodejs
 
 # 安装 OpenClaw
 npm install -g openclaw
+
+# macOS 示例
+# brew install node@22
+# npm install -g openclaw
 
 # 验证
 openclaw version
@@ -180,7 +197,7 @@ Token: abc123def456...
 保存位置: /root/.openclaw/.federation-token
 ```
 
-**保存好这个 Token！**
+**保存好这个 Token 文件！**
 
 ### 第三步：部署 Worker 节点
 
@@ -189,9 +206,11 @@ Token: abc123def456...
 ```bash
 sudo ./deploy-federation.sh worker \
   --master-ip 100.64.0.1 \
-  --token "从Master复制的Token" \
+  --token-file /root/.openclaw/.federation-token \
   --node-name "worker1"
 ```
+
+提示：如果你的系统没有 `/root`（如 macOS），可通过设置 `TOKEN_FILE` 指定 Token 文件路径。
 
 #### 可选：自动注册到 Master
 

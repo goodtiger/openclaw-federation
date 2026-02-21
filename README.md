@@ -11,6 +11,7 @@ This project provides a complete solution for deploying and managing OpenClaw ac
 - **Master Node**: Central coordination hub
 - **Worker Nodes**: Execution nodes with different skills (Docker, K8s, Apple Notes, etc.)
 - **Tailscale Network**: Secure encrypted tunnel between all nodes
+- **Platforms**: Linux/macOS/Raspberry Pi (mix and match for Master/Worker)
 
 ## Quick Start
 
@@ -21,11 +22,13 @@ sudo ./bin/deploy-federation.sh master --bind-tailscale
 # 2. Deploy Worker
 sudo ./bin/deploy-federation.sh worker \
   --master-ip 100.64.0.1 \
-  --token "YOUR_TOKEN"
+  --token-file /root/.openclaw/.federation-token
 
 # 3. Verify
 ./bin/manage-federation.sh list
 ```
+
+If your system doesn't have `/root` (e.g. macOS), set `TOKEN_FILE` to a custom path.
 
 ## Directory Structure
 

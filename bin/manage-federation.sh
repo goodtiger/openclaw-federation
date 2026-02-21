@@ -44,10 +44,13 @@ add_node() {
   
   TOKEN=$(get_token)
   
-  openclaw pair approve \
+  if ! openclaw pair approve \
     --name "$name" \
     --url "ws://$ip:18789" \
-    --token "$TOKEN"
+    --token "$TOKEN"; then
+    error "节点 $name 添加失败"
+    exit 1
+  fi
   
   # 保存节点信息
   if [[ -n "$skills" ]]; then
