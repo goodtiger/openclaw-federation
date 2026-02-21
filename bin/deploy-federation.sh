@@ -201,8 +201,14 @@ pkg_has_tailscale() {
   if command -v rpm &> /dev/null; then
     rpm -q tailscale > /dev/null 2>&1 && return 0
   fi
-  if command -v brew &> /dev/null; then
-    brew list --formula tailscale > /dev/null 2>&1 && return 0
+  local brew_bin
+  brew_bin=$(resolve_brew_bin || true)
+  if [[ -n "$brew_bin" ]]; then
+    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+      sudo -u "$SUDO_USER" "$brew_bin" list --formula tailscale > /dev/null 2>&1 && return 0
+    else
+      "$brew_bin" list --formula tailscale > /dev/null 2>&1 && return 0
+    fi
   fi
   return 1
 }
@@ -244,6 +250,22 @@ install_tailscale_ubuntu_repo() {
 
   apt-get update -qq || true
   apt-get install -y -qq tailscale
+}
+
+resolve_brew_bin() {
+  if command -v brew &> /dev/null; then
+    command -v brew
+    return 0
+  fi
+  if [[ -x "/opt/homebrew/bin/brew" ]]; then
+    echo "/opt/homebrew/bin/brew"
+    return 0
+  fi
+  if [[ -x "/usr/local/bin/brew" ]]; then
+    echo "/usr/local/bin/brew"
+    return 0
+  fi
+  return 1
 }
 
 # 获取或生成 Token
@@ -591,10 +613,23 @@ install_tailscale_safe() {
     if yum install -y tailscale; then
       return 0
     fi
-  elif command -v brew &> /dev/null; then
-    log_info "尝试使用 brew 安装..."
-    if brew install tailscale; then
-      return 0
+  else
+    local brew_bin
+    brew_bin=$(resolve_brew_bin || true)
+    if [[ -n "$brew_bin" ]]; then
+      if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        log_info "尝试使用 brew 安装（以用户 $SUDO_USER 运行）..."
+        if sudo -u "$SUDO_USER" "$brew_bin" install tailscale; then
+          return 0
+        fi
+      elif [[ $EUID -eq 0 ]]; then
+        log_warn "检测到 brew，但当前为 root，无法安全运行 brew"
+      else
+        log_info "尝试使用 brew 安装..."
+        if "$brew_bin" install tailscale; then
+          return 0
+        fi
+      fi
     fi
   fi
 
