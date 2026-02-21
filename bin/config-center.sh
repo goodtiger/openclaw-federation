@@ -275,10 +275,8 @@ merge_remote_config() {
   
   # 合并到本地配置
   local tmp_file=$(mktemp)
-  local ts
-  ts=$(now_iso)
-  jq --argjson channels "$channels" --argjson agents "$agents" --arg ts "$ts" \
-     '.channels = $channels | .agents = $agents | .meta.config_synced_at = $ts' \
+  jq --argjson channels "$channels" --argjson agents "$agents" \
+     '.channels = $channels | .agents = $agents' \
      "$local_config" > "$tmp_file"
   mv "$tmp_file" "$local_config"
   

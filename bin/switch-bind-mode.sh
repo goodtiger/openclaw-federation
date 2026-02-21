@@ -42,18 +42,24 @@ show_status() {
   echo ""
   
   # 判断当前模式
-  if [[ "$current_bind" == "0.0.0.0" ]]; then
-    log_highlight "当前模式: 开放模式 (0.0.0.0)"
-    echo "  ✅ 可通过 127.0.0.1 访问（本地调试）"
+  if [[ "$current_bind" == "loopback" ]]; then
+    log_highlight "当前模式: 本机模式 (loopback)"
+    echo "  ✅ 仅可通过 127.0.0.1 访问（本地调试）"
+    echo "  ❌ 内网其他机器无法访问"
+    echo "  ❌ Tailscale 网络无法访问"
+  elif [[ "$current_bind" == "lan" ]]; then
+    log_highlight "当前模式: 局域网模式 (lan)"
     echo "  ✅ 可通过内网 IP 访问"
-    echo "  ✅ 可通过 Tailscale IP 访问"
+    echo "  ⚠️  可能无法通过 Tailscale 访问（取决于网卡绑定策略）"
     echo "  ⚠️  需要配置防火墙保护"
-  else
-    log_highlight "当前模式: 安全模式 (Tailscale IP)"
+  elif [[ "$current_bind" == "tailnet" ]]; then
+    log_highlight "当前模式: 安全模式 (tailnet)"
     echo "  ✅ 仅可通过 Tailscale 网络访问"
     echo "  ✅ 天然安全，无需防火墙"
     echo "  ❌ 无法通过 127.0.0.1 访问"
     echo "  ❌ 内网其他机器无法直接访问"
+  else
+    log_warn "当前模式未知: $current_bind"
   fi
   echo ""
 }
@@ -69,7 +75,7 @@ backup_config() {
 # 切换到 0.0.0.0 模式
 switch_to_all_interfaces() {
   echo ""
-  log_highlight "=== 切换到开放模式 (0.0.0.0) ==="
+  log_highlight "=== 切换到局域网模式 (lan) ==="
   echo ""
   
   # 备份
@@ -77,14 +83,11 @@ switch_to_all_interfaces() {
   log_success "配置已备份: $backup"
   echo ""
   
-  # 获取当前 Tailscale IP（用于提示）
-  local current_bind=$(jq -r '.gateway.bind' "$CONFIG_FILE")
-  
   # 修改绑定地址
-  jq '.gateway.bind = "0.0.0.0"' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"
+  jq '.gateway.bind = "lan"' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"
   mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
   
-  log_success "绑定地址已更新: $current_bind → 0.0.0.0"
+  log_success "绑定模式已更新: lan"
   echo ""
   
   # 询问是否重启 Gateway
@@ -99,9 +102,7 @@ switch_to_all_interfaces() {
   log_highlight "=== 切换完成 ==="
   echo ""
   echo "现在你可以:"
-  echo "  ✅ 通过 127.0.0.1:18789 本地访问"
   echo "  ✅ 通过内网 IP 访问"
-  echo "  ✅ 通过 Tailscale IP 访问（Master 仍可管理）"
   echo ""
   log_warn "⚠️  注意: 请确保防火墙已配置，避免暴露在公网!"
   echo ""
@@ -110,7 +111,7 @@ switch_to_all_interfaces() {
 # 切换到 Tailscale IP 模式
 switch_to_tailscale() {
   echo ""
-  log_highlight "=== 切换到安全模式 (Tailscale IP) ==="
+  log_highlight "=== 切换到安全模式 (tailnet) ==="
   echo ""
   
   # 获取 Tailscale IP
@@ -126,10 +127,10 @@ switch_to_tailscale() {
   echo ""
   
   # 修改绑定地址
-  jq --arg ip "$ts_ip" '.gateway.bind = $ip' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"
+  jq '.gateway.bind = "tailnet"' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"
   mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
   
-  log_success "绑定地址已更新: 0.0.0.0 → $ts_ip"
+  log_success "绑定模式已更新: tailnet"
   echo ""
   
   # 询问是否重启
@@ -185,24 +186,32 @@ test_connection() {
   echo "测试访问方式:"
   echo ""
   
-  # 1. 本地访问（仅当绑定 0.0.0.0 时）
-  if [[ "$current_bind" == "0.0.0.0" ]]; then
+  # 1. 本地访问（仅当 loopback）
+  if [[ "$current_bind" == "loopback" ]]; then
     if curl -s http://127.0.0.1:18789/health &>/dev/null; then
       log_success "✅ 127.0.0.1:18789 可访问"
     else
       log_error "❌ 127.0.0.1:18789 无法访问"
     fi
   else
-    echo "  ⏭️  跳过 127.0.0.1 测试（非 0.0.0.0 模式）"
+    echo "  ⏭️  跳过 127.0.0.1 测试（非 loopback 模式）"
   fi
   
-  # 2. Tailscale IP
+  # 2. Tailscale IP（tailnet 模式下必须可访问）
   local ts_ip=$(tailscale ip -4 2>/dev/null | head -1)
-  if [[ -n "$ts_ip" ]]; then
-    if curl -s "http://$ts_ip:18789/health" &>/dev/null; then
-      log_success "✅ Tailscale ($ts_ip:18789) 可访问"
+  if [[ "$current_bind" == "tailnet" ]]; then
+    if [[ -n "$ts_ip" ]]; then
+      if curl -s "http://$ts_ip:18789/health" &>/dev/null; then
+        log_success "✅ Tailscale ($ts_ip:18789) 可访问"
+      else
+        log_error "❌ Tailscale ($ts_ip:18789) 无法访问"
+      fi
     else
-      log_error "❌ Tailscale ($ts_ip:18789) 无法访问"
+      log_error "❌ 无法获取 Tailscale IP"
+    fi
+  else
+    if [[ -n "$ts_ip" ]]; then
+      echo "  ⏭️  未强制测试 Tailscale（当前模式: $current_bind）"
     fi
   fi
   
@@ -267,8 +276,8 @@ OpenClaw Gateway 绑定模式切换工具
 
 命令:
   status          显示当前绑定状态
-  to-all          切换到 0.0.0.0 模式（开放模式）
-  to-tailscale    切换到 Tailscale IP 模式（安全模式）
+  to-all          切换到 lan 模式（局域网）
+  to-tailscale    切换到 tailnet 模式（安全模式）
   test            测试各种访问方式
   rollback        回滚到之前的配置
   help            显示帮助
@@ -290,8 +299,9 @@ OpenClaw Gateway 绑定模式切换工具
   ./switch-bind-mode.sh rollback
 
 说明:
-  开放模式 (0.0.0.0): 可通过 127.0.0.1、内网 IP、Tailscale IP 访问
-  安全模式 (Tailscale): 仅可通过 Tailscale 网络访问
+  loopback: 仅本机访问（127.0.0.1）
+  lan: 局域网访问
+  tailnet: 仅 Tailscale 网络访问
 
 EOF
 }

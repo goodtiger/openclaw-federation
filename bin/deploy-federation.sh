@@ -20,6 +20,8 @@ DEFAULT_TOKEN_FILE="/root/.openclaw/.federation-token"
 TOKEN_FILE="${TOKEN_FILE:-$DEFAULT_TOKEN_FILE}"
 CONFIG_FILE="/root/.openclaw/openclaw.json"
 BACKUP_DIR="/root/.openclaw/.backups"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_NAME="$(basename "$0")"
 ROLE="${1:-}"
 shift || true
 
@@ -30,8 +32,9 @@ NODE_SKILLS=""
 PRESERVE_CONFIG=true
 IMPORT_TOKEN=""      # 从其他机器导入的 Token
 IMPORT_TOKEN_FILE="" # 指定 Token 文件路径
-BIND_TAILSCALE=false         # 默认绑定 0.0.0.0，可选绑定 Tailscale IP
+BIND_TAILSCALE=false         # 绑定 Tailscale 网络（tailnet）
 ENABLE_CONFIG_CENTER=false   # 默认不启用配置中心
+BIND_MODE=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -63,6 +66,10 @@ while [[ $# -gt 0 ]]; do
       BIND_TAILSCALE=true
       shift
       ;;
+    --bind-mode)
+      BIND_MODE="$2"
+      shift 2
+      ;;
     --overwrite-config)
       PRESERVE_CONFIG=false
       shift
@@ -79,11 +86,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 show_help() {
-  cat << 'EOF'
+  cat << 'EOF' | sed "s/__SCRIPT_NAME__/$SCRIPT_NAME/g"
 OpenClaw + Tailscale 联邦部署脚本（Token 共享版）
 
 用法:
-  ./deploy.sh [ROLE] [OPTIONS]
+  ./__SCRIPT_NAME__ [ROLE] [OPTIONS]
 
 角色:
   master    部署主控节点（VPS/公网服务器）
@@ -95,7 +102,8 @@ OpenClaw + Tailscale 联邦部署脚本（Token 共享版）
   --skills "s1 s2"        要安装的技能列表
   --token TOKEN           指定共享 Token（worker 使用）
   --token-file PATH       从文件读取 Token（worker 使用）
-  --bind-tailscale        Gateway 绑定 Tailscale IP（默认绑定 0.0.0.0）
+  --bind-tailscale        Gateway 绑定 Tailscale 网络（等价于 --bind-mode tailnet）
+  --bind-mode MODE        绑定模式: loopback/lan/tailnet/auto/custom
   --enable-config-center  启用配置中心（默认不启用）
   --overwrite-config      完全覆盖配置（默认会保留现有配置）
 
@@ -119,21 +127,21 @@ Token 共享方式:
 
   方式 4: 环境变量
     export FEDERATION_TOKEN="主节点显示的 Token"
-    ./deploy.sh worker --master-ip 100.64.0.1
+    ./__SCRIPT_NAME__ worker --master-ip 100.64.0.1
 
 示例:
   # 部署主节点（生成新 Token）
-  ./deploy.sh master
+  ./__SCRIPT_NAME__ master
 
   # 工作节点方式 1: 直接使用 Token
-  ./deploy.sh worker --master-ip 100.64.0.1 --token "abc123..."
+  ./__SCRIPT_NAME__ worker --master-ip 100.64.0.1 --token "abc123..."
 
   # 工作节点方式 2: 从文件读取 Token
-  ./deploy.sh worker --master-ip 100.64.0.1 --token-file /path/to/token.txt
+  ./__SCRIPT_NAME__ worker --master-ip 100.64.0.1 --token-file /path/to/token.txt
 
   # 工作节点方式 3: 环境变量
   export FEDERATION_TOKEN="abc123..."
-  ./deploy.sh worker --master-ip 100.64.0.1
+  ./__SCRIPT_NAME__ worker --master-ip 100.64.0.1
 
 EOF
 }
@@ -149,6 +157,18 @@ npm_has_package() {
   local pkg=$1
   command -v npm &> /dev/null || return 1
   npm list -g --depth=0 "$pkg" > /dev/null 2>&1
+}
+
+is_valid_bind_mode() {
+  local mode=$1
+  case "$mode" in
+    loopback|lan|tailnet|auto|custom)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 pkg_has_tailscale() {
@@ -293,14 +313,14 @@ show_token_export_help() {
   log_info "方式 1: 复制 Token 文件内容"
   echo "  Token: ${YELLOW}$token_display${NC}"
   echo "  在其他机器上运行:"
-  echo -e "  ${GREEN}./deploy.sh worker --master-ip $TAILSCALE_IP --token-file $TOKEN_FILE${NC}"
+  echo -e "  ${GREEN}./$SCRIPT_NAME worker --master-ip $TAILSCALE_IP --token-file $TOKEN_FILE${NC}"
   echo ""
   
   log_info "方式 2: SSH 传输 Token 文件"
   echo "  从主节点复制到工作节点:"
   echo -e "  ${CYAN}scp $TOKEN_FILE user@worker:$TOKEN_FILE${NC}"
   echo "  然后在工作节点上运行:"
-  echo -e "  ${GREEN}./deploy.sh worker --master-ip $TAILSCALE_IP${NC}"
+  echo -e "  ${GREEN}./$SCRIPT_NAME worker --master-ip $TAILSCALE_IP${NC}"
   echo ""
   
   log_info "方式 3: 直接 SSH 写入"
@@ -310,7 +330,7 @@ show_token_export_help() {
   log_info "方式 4: 环境变量"
   echo -e "  在工作节点上:"
   echo -e "  ${CYAN}export FEDERATION_TOKEN=\"\$(cat $TOKEN_FILE)\"${NC}"
-  echo -e "  ${GREEN}./deploy.sh worker --master-ip $TAILSCALE_IP${NC}"
+  echo -e "  ${GREEN}./$SCRIPT_NAME worker --master-ip $TAILSCALE_IP${NC}"
   echo ""
   
   if [[ "${SHOW_FULL_TOKEN:-false}" != "true" ]]; then
@@ -354,7 +374,7 @@ backup_config() {
 # 安全合并配置
 merge_config_with_jq() {
   local role=$1
-  local ip=$2
+  local bind_mode=$2
   local backup_name=$3
   
   log_info "使用 jq 安全合并配置..."
@@ -363,7 +383,7 @@ merge_config_with_jq() {
 {
   "gateway": {
     "port": $GATEWAY_PORT,
-    "bind": "$ip",
+    "bind": "$bind_mode",
     "mode": "local",
     "auth": {
       "mode": "token",
@@ -376,9 +396,7 @@ merge_config_with_jq() {
   },
   "meta": {
     "lastTouchedVersion": "$(openclaw version 2>/dev/null | head -1 | awk '{print $2}' || echo 'unknown')",
-    "lastTouchedAt": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)",
-    "federationRole": "$role",
-    "backupFile": "$backup_name"
+    "lastTouchedAt": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
   }
 }
 EOF
@@ -392,7 +410,7 @@ EOF
 # 基础配置模式
 create_basic_config() {
   local role=$1
-  local ip=$2
+  local bind_mode=$2
   
   log_warn "使用基础配置模式"
   
@@ -400,13 +418,11 @@ create_basic_config() {
 {
   "meta": {
     "lastTouchedVersion": "$(openclaw version 2>/dev/null | head -1 | awk '{print $2}' || echo 'unknown')",
-    "lastTouchedAt": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)",
-    "federationRole": "$role",
-    "note": "原有配置被备份，请手动合并其他设置"
+    "lastTouchedAt": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
   },
   "gateway": {
     "port": $GATEWAY_PORT,
-    "bind": "$ip",
+    "bind": "$bind_mode",
     "mode": "local",
     "auth": {
       "mode": "token",
@@ -433,29 +449,35 @@ EOF
 # 配置 Gateway
 configure_gateway_safe() {
   local role=$1
-  local ip=$2
+  local bind_mode=$2
   
   log_info "配置 OpenClaw Gateway ($role 模式)..."
   mkdir -p "$(dirname "$CONFIG_FILE")"
+
+  if ! is_valid_bind_mode "$bind_mode"; then
+    log_error "无效的绑定模式: $bind_mode"
+    log_info "可选: loopback/lan/tailnet/auto/custom"
+    exit 1
+  fi
   
   local backup_name=$(backup_config)
   
   if [[ "$PRESERVE_CONFIG" == "true" && -f "$BACKUP_DIR/$backup_name" ]]; then
     if check_jq; then
-      merge_config_with_jq "$role" "$ip" "$backup_name"
+      merge_config_with_jq "$role" "$bind_mode" "$backup_name"
     else
       log_warn "无法安全合并配置"
       read -p "继续将覆盖配置? [y/N]: " choice
       [[ "$choice" =~ ^[Yy]$ ]] || exit 0
-      create_basic_config "$role" "$ip"
+      create_basic_config "$role" "$bind_mode"
     fi
   else
-    create_basic_config "$role" "$ip"
+    create_basic_config "$role" "$bind_mode"
   fi
   
   if [[ -f "$CONFIG_FILE" ]]; then
     log_success "Gateway 配置完成"
-    log_info "监听地址: $ip:$GATEWAY_PORT"
+    log_info "绑定模式: $bind_mode"
     if command -v jq &> /dev/null; then
       jq '.gateway | {port, bind, auth: {mode: .auth.mode}}' "$CONFIG_FILE" 2>/dev/null || true
     fi
@@ -690,24 +712,41 @@ main() {
   setup_tailscale
   check_openclaw
   
-  # 决定绑定地址
-  local bind_ip="0.0.0.0"
-  if [[ "$ROLE" == "master" && "$BIND_TAILSCALE" == "true" ]]; then
-    # Master 使用 --bind-tailscale 时绑定 Tailscale IP
-    bind_ip="$TAILSCALE_IP"
-    log_info "Master Gateway 将绑定 Tailscale IP: $bind_ip (安全模式)"
-  elif [[ "$ROLE" == "worker" && "$BIND_TAILSCALE" == "true" ]]; then
-    # Worker 也可以使用 --bind-tailscale
-    bind_ip="$TAILSCALE_IP"
-    log_info "Worker Gateway 将绑定 Tailscale IP: $bind_ip"
-    log_warn "注意: 绑定 Tailscale IP 后无法通过 127.0.0.1 访问 Gateway"
-  else
-    # 默认绑定 0.0.0.0 (推荐 Worker 使用)
-    log_info "Gateway 将绑定 0.0.0.0 (所有接口)"
-    if [[ "$ROLE" == "master" ]]; then
-      log_warn "注意: Master 绑定 0.0.0.0 时，建议配���防火墙或使用 --bind-tailscale"
-    fi
+  # 决定绑定模式
+  local bind_mode="$BIND_MODE"
+  if [[ -z "$bind_mode" && "$BIND_TAILSCALE" == "true" ]]; then
+    bind_mode="tailnet"
   fi
+  if [[ -z "$bind_mode" ]]; then
+    # 默认使用 lan，保持与历史 0.0.0.0 行为一致
+    bind_mode="lan"
+  fi
+
+  if ! is_valid_bind_mode "$bind_mode"; then
+    log_error "无效的绑定模式: $bind_mode"
+    log_info "可选: loopback/lan/tailnet/auto/custom"
+    exit 1
+  fi
+
+  case "$bind_mode" in
+    loopback)
+      log_info "Gateway 将绑定 loopback（仅本机访问）"
+      ;;
+    lan)
+      log_info "Gateway 将绑定 lan（局域网访问）"
+      log_warn "如需通过 Tailscale 访问，请使用 --bind-tailscale 或 --bind-mode tailnet"
+      ;;
+    tailnet)
+      log_info "Gateway 将绑定 tailnet（Tailscale 网络）"
+      log_warn "注意: tailnet 模式下无法通过 127.0.0.1 访问"
+      ;;
+    auto)
+      log_info "Gateway 将绑定 auto（自动选择）"
+      ;;
+    custom)
+      log_warn "Gateway 绑定 custom 需要进一步配置，请参考官方文档"
+      ;;
+  esac
   
   if [[ -f "$CONFIG_FILE" && "$PRESERVE_CONFIG" == "true" ]]; then
     echo ""
@@ -717,7 +756,7 @@ main() {
     [[ "$confirm" =~ ^[Nn]$ ]] && { log_info "已取消"; exit 0; }
   fi
   
-  configure_gateway_safe "$ROLE" "$bind_ip"
+  configure_gateway_safe "$ROLE" "$bind_mode"
   
   [[ "$ROLE" == "master" ]] && open_firewall
   
