@@ -1,971 +1,286 @@
 #!/bin/bash
 #
-# OpenClaw + Tailscale 联邦部署脚本 - Token 共享版
-# 支持跨机器同步 Token
+# OpenClaw 联邦部署脚本 (生产级 Hybrid 支持 v2.2)
+# 变更: Hybrid 模式下强制隔离 Worker 的状态目录，防止文件锁冲突
 #
 
 set -e
 
-# 颜色定义
+# --- 配置 ---
+GATEWAY_PORT=18789
+SERVICE_NAME_MASTER="openclaw-gateway"
+SERVICE_NAME_WORKER="openclaw-worker"
+
+# 颜色
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
 NC='\033[0m'
 
-# 默认配置
-GATEWAY_PORT=18789
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SCRIPT_NAME="$(basename "$0")"
+# --- 辅助函数 ---
 
-resolve_openclaw_home() {
-  if [[ -n "${OPENCLAW_HOME:-}" ]]; then
-    echo "$OPENCLAW_HOME"
-    return 0
-  fi
-
-  local user_home="$HOME"
-  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
-    if command -v getent &> /dev/null; then
-      user_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-    elif [[ -d "/Users/$SUDO_USER" ]]; then
-      user_home="/Users/$SUDO_USER"
-    elif [[ -d "/home/$SUDO_USER" ]]; then
-      user_home="/home/$SUDO_USER"
-    fi
-  fi
-  echo "$user_home/.openclaw"
-}
-
-OPENCLAW_HOME="$(resolve_openclaw_home)"
-DEFAULT_TOKEN_FILE="$OPENCLAW_HOME/.federation-token"
-TOKEN_FILE="${TOKEN_FILE:-$DEFAULT_TOKEN_FILE}"
-CONFIG_FILE="$OPENCLAW_HOME/openclaw.json"
-BACKUP_DIR="$OPENCLAW_HOME/.backups"
-
-ROLE="${1:-}"
-shift || true
-
-# 解析参数
-MASTER_IP=""
-NODE_NAME=""
-NODE_SKILLS=""
-PRESERVE_CONFIG=true
-IMPORT_TOKEN=""      # 从其他机器导入的 Token
-IMPORT_TOKEN_FILE="" # 指定 Token 文件路径
-BIND_TAILSCALE=false         # 绑定 Tailscale 网络（tailnet）
-ENABLE_CONFIG_CENTER=false   # 默认不启用配置中心
-BIND_MODE=""
-
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --master-ip)
-      MASTER_IP="$2"
-      shift 2
-      ;;
-    --node-name)
-      NODE_NAME="$2"
-      shift 2
-      ;;
-    --skills)
-      NODE_SKILLS="$2"
-      shift 2
-      ;;
-    --token)
-      IMPORT_TOKEN="$2"
-      shift 2
-      ;;
-    --enable-config-center)
-      ENABLE_CONFIG_CENTER=true
-      shift
-      ;;
-    --token-file)
-      IMPORT_TOKEN_FILE="$2"
-      shift 2
-      ;;
-    --bind-tailscale)
-      BIND_TAILSCALE=true
-      shift
-      ;;
-    --bind-mode)
-      BIND_MODE="$2"
-      shift 2
-      ;;
-    --overwrite-config)
-      PRESERVE_CONFIG=false
-      shift
-      ;;
-    --help|-h)
-      show_help
-      exit 0
-      ;;
-    *)
-      echo -e "${RED}未知参数: $1${NC}"
-      exit 1
-      ;;
-  esac
-done
-
-show_help() {
-  cat << 'EOF' | sed "s/__SCRIPT_NAME__/$SCRIPT_NAME/g"
-OpenClaw + Tailscale 联邦部署脚本（Token 共享版）
-
-用法:
-  ./__SCRIPT_NAME__ [ROLE] [OPTIONS]
-
-角色:
-  master    部署主控节点（VPS/公网服务器）
-  worker    部署工作节点（家庭服务器/Mac/Pi）
-
-说明:
-  可在非 root 下运行，安装依赖或配置防火墙时会使用 sudo
-
-选项:
-  --master-ip IP          主节点的 Tailscale IP（worker 必需）
-  --node-name NAME        节点名称（如: home-server, mac-pc）
-  --skills "s1 s2"        要安装的技能列表
-  --token TOKEN           指定共享 Token（worker 使用）
-  --token-file PATH       从文件读取 Token（worker 使用）
-  --bind-tailscale        Gateway 绑定 Tailscale 网络（等价于 --bind-mode tailnet）
-  --bind-mode MODE        绑定模式: loopback/lan/tailnet/auto/custom
-  --enable-config-center  启用配置中心（默认不启用）
-  --overwrite-config      完全覆盖配置（默认会保留现有配置）
-
-环境变量:
-  FEDERATION_TOKEN        共享 Token（优先级高于 --token）
-  TOKEN_FILE              Token 文件路径（默认: ~/.openclaw/.federation-token）
-  OPENCLAW_HOME           OpenClaw 工作目录（默认: ~/.openclaw 或 sudo 用户家目录）
-  TAILSCALE_APT_BASE       Tailscale APT 源基础地址（默认: https://pkgs.tailscale.com/stable）
-  ALLOW_UNSAFE_TAILSCALE_INSTALL=true  允许使用 curl | sh 安装 Tailscale（不推荐）
-  SHOW_FULL_TOKEN=true    显示完整 Token（默认仅脱敏显示）
-
-Token 共享方式:
-
-  方式 1: 复制粘贴（最简单）
-    主节点部署后显示 Token，手动复制到工作节点
-
-  方式 2: 文件复制
-    主节点: cat ~/.openclaw/.federation-token
-    工作节点: 保存到相同路径，或使用 --token-file
-
-  方式 3: SSH 传输
-    主节点 → 工作节点: ssh user@worker "echo TOKEN > ~/.openclaw/.federation-token"
-
-  方式 4: 环境变量
-    export FEDERATION_TOKEN="主节点显示的 Token"
-    ./__SCRIPT_NAME__ worker --master-ip 100.64.0.1
-
-示例:
-  # 部署主节点（生成新 Token）
-  ./__SCRIPT_NAME__ master
-
-  # 工作节点方式 1: 直接使用 Token
-  ./__SCRIPT_NAME__ worker --master-ip 100.64.0.1 --token "abc123..."
-
-  # 工作节点方式 2: 从文件读取 Token
-  ./__SCRIPT_NAME__ worker --master-ip 100.64.0.1 --token-file /path/to/token.txt
-
-  # 工作节点方式 3: 环境变量
-  export FEDERATION_TOKEN="abc123..."
-  ./__SCRIPT_NAME__ worker --master-ip 100.64.0.1
-
-EOF
-}
-
-# 日志函数
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-log_highlight() { echo -e "${CYAN}$1${NC}"; }
 
-SUDO_CMD=""
-
+# 检测是否为 root 或有 sudo
 init_privilege() {
+  SUDO_CMD=""
   if [[ $EUID -ne 0 ]]; then
     if command -v sudo &> /dev/null; then
       SUDO_CMD="sudo"
-      log_info "当前非 root，将在需要时使用 sudo"
     else
-      log_warn "当前非 root 且未安装 sudo，部分操作可能失败"
+      log_warn "非 root 且无 sudo，安装可能会失败"
     fi
   fi
 }
 
-require_sudo() {
-  if [[ $EUID -ne 0 && -z "$SUDO_CMD" ]]; then
-    log_error "需要 root 权限或 sudo 才能执行此操作"
-    return 1
-  fi
-  return 0
-}
-
-npm_has_package() {
-  local pkg=$1
-  command -v npm &> /dev/null || return 1
-  npm list -g --depth=0 "$pkg" > /dev/null 2>&1
-}
-
-is_valid_bind_mode() {
-  local mode=$1
-  case "$mode" in
-    loopback|lan|tailnet|auto|custom)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-pkg_has_tailscale() {
-  if command -v dpkg &> /dev/null; then
-    dpkg -s tailscale > /dev/null 2>&1 && return 0
-  fi
-  if command -v rpm &> /dev/null; then
-    rpm -q tailscale > /dev/null 2>&1 && return 0
-  fi
-  local brew_bin
-  brew_bin=$(resolve_brew_bin || true)
-  if [[ -n "$brew_bin" ]]; then
-    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
-      sudo -u "$SUDO_USER" "$brew_bin" list --formula tailscale > /dev/null 2>&1 && return 0
-    else
-      "$brew_bin" list --formula tailscale > /dev/null 2>&1 && return 0
-    fi
-  fi
-  return 1
-}
-
-is_ubuntu() {
-  if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    [[ "${ID:-}" == "ubuntu" ]]
-    return $?
-  fi
-  return 1
-}
-
-ubuntu_codename() {
-  if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    if [[ -n "${VERSION_CODENAME:-}" ]]; then
-      echo "$VERSION_CODENAME"
-      return 0
-    fi
-    if [[ -n "${UBUNTU_CODENAME:-}" ]]; then
-      echo "$UBUNTU_CODENAME"
-      return 0
-    fi
-  fi
-  return 1
-}
-
-install_tailscale_ubuntu_repo() {
-  local codename
-  codename=$(ubuntu_codename) || return 1
-
-  local base="${TAILSCALE_APT_BASE:-https://pkgs.tailscale.com/stable}"
-  log_info "添加 Tailscale 官方 APT 源: $codename"
-  require_sudo || return 1
-  $SUDO_CMD mkdir -p /usr/share/keyrings
-
-  local gpg_url="${base}/ubuntu/${codename}.noarmor.gpg"
-  local list_url="${base}/ubuntu/${codename}.tailscale-keyring.list"
-  local tmp_gpg
-  local tmp_list
-  tmp_gpg=$(mktemp)
-  tmp_list=$(mktemp)
-
-  if ! download_file "$gpg_url" "$tmp_gpg"; then
-    log_warn "无法下载 GPG key，可能被地区/网络限制"
-    log_info "可设置 TAILSCALE_APT_BASE 使用镜像，或配置 http_proxy/https_proxy"
-    return 1
-  fi
-  if ! download_file "$list_url" "$tmp_list"; then
-    log_warn "无法下载 APT 源列表，可能被地区/网络限制"
-    log_info "可设置 TAILSCALE_APT_BASE 使用镜像，或配置 http_proxy/https_proxy"
-    return 1
-  fi
-
-  $SUDO_CMD install -m 644 "$tmp_gpg" /usr/share/keyrings/tailscale-archive-keyring.gpg
-  $SUDO_CMD install -m 644 "$tmp_list" /etc/apt/sources.list.d/tailscale.list
-  rm -f "$tmp_gpg" "$tmp_list" 2>/dev/null || true
-
-  $SUDO_CMD apt-get update -qq || true
-  $SUDO_CMD apt-get install -y -qq tailscale
-}
-
-resolve_brew_bin() {
-  if command -v brew &> /dev/null; then
-    command -v brew
-    return 0
-  fi
-  if [[ -x "/opt/homebrew/bin/brew" ]]; then
-    echo "/opt/homebrew/bin/brew"
-    return 0
-  fi
-  if [[ -x "/usr/local/bin/brew" ]]; then
-    echo "/usr/local/bin/brew"
-    return 0
-  fi
-  return 1
-}
-
-download_file() {
-  local url=$1
-  local out=$2
-  local http_code
-  http_code=$(curl -sS -w "%{http_code}" -o "$out" "$url" || echo "000")
-  if [[ "$http_code" != "200" ]]; then
-    log_error "下载失败 (HTTP $http_code): $url"
-    rm -f "$out" 2>/dev/null || true
-    return 1
-  fi
-  return 0
-}
-
-start_tailscale_daemon() {
-  if command -v systemctl &> /dev/null; then
-    require_sudo || return 1
-    $SUDO_CMD systemctl start tailscaled 2>/dev/null || true
-  elif command -v service &> /dev/null; then
-    require_sudo || return 1
-    $SUDO_CMD service tailscaled start 2>/dev/null || true
-  fi
-
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    local brew_bin
-    brew_bin=$(resolve_brew_bin || true)
-    if [[ -n "$brew_bin" && -n "${SUDO_USER:-}" ]]; then
-      sudo -u "$SUDO_USER" "$brew_bin" services start tailscale > /dev/null 2>&1 || true
-    elif [[ -n "$brew_bin" && $EUID -ne 0 ]]; then
-      "$brew_bin" services start tailscale > /dev/null 2>&1 || true
-    fi
+# 获取当前用户的 OpenClaw 目录
+resolve_user_home() {
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    echo "$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+  else
+    echo "$HOME"
   fi
 }
 
-# 获取或生成 Token
-get_or_generate_token() {
-  # 优先级: 环境变量 > 命令行参数 --token > 命令行参数 --token-file > 本地文件 > 生成新 Token
-  
-  # 1. 检查环境变量
-  if [[ -n "${FEDERATION_TOKEN:-}" ]]; then
-    TOKEN="$FEDERATION_TOKEN"
-    log_info "从环境变量 FEDERATION_TOKEN 读取 Token"
-    save_token "$TOKEN"
-    return 0
+USER_HOME="$(resolve_user_home)"
+OPENCLAW_HOME="$USER_HOME/.openclaw"
+WORKER_HOME="$USER_HOME/.openclaw-worker" # Hybrid 模式专用隔离目录
+CONFIG_FILE="$OPENCLAW_HOME/openclaw.json"
+
+# 安装 OpenClaw
+install_openclaw() {
+  if command -v openclaw &> /dev/null; then
+    log_info "OpenClaw 已安装: $(openclaw --version)"
+    return
+  fi
+
+  log_info "正在安装 OpenClaw CLI..."
+  if ! command -v npm &> /dev/null; then
+    log_info "安装 Node.js..."
+    curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO_CMD bash -
+    $SUDO_CMD apt-get install -y nodejs
   fi
   
-  # 2. 检查命令行 --token 参数
-  if [[ -n "$IMPORT_TOKEN" ]]; then
-    TOKEN="$IMPORT_TOKEN"
-    log_info "使用命令行指定的 Token"
-    save_token "$TOKEN"
-    return 0
+  $SUDO_CMD npm install -g openclaw
+  log_success "OpenClaw 安装完成"
+}
+
+# 安装/检查 Tailscale
+setup_tailscale() {
+  if ! command -v tailscale &> /dev/null; then
+    log_info "安装 Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
   fi
   
-  # 3. 检查命令行 --token-file 参数
-  if [[ -n "$IMPORT_TOKEN_FILE" ]]; then
-    if [[ -f "$IMPORT_TOKEN_FILE" ]]; then
-      TOKEN=$(cat "$IMPORT_TOKEN_FILE" | tr -d '[:space:]')
-      log_info "从文件 $IMPORT_TOKEN_FILE 读取 Token"
-      save_token "$TOKEN"
-      return 0
-    else
-      log_error "指定的 Token 文件不存在: $IMPORT_TOKEN_FILE"
-      exit 1
-    fi
-  fi
-  
-  # 4. 检查本地 Token 文件
-  if [[ -f "$TOKEN_FILE" ]]; then
-    TOKEN=$(cat "$TOKEN_FILE" | tr -d '[:space:]')
-    if [[ -n "$TOKEN" ]]; then
-      log_info "使用本地 Token 文件"
-      return 0
-    fi
-  fi
-  
-  # 5. 如果是 worker 角色，但没有 Token，报错
-  if [[ "$ROLE" == "worker" ]]; then
-    log_error "Worker 节点需要提供 Token"
-    echo ""
-    log_info "请使用以下方式之一提供 Token:"
-    log_highlight "  1. --token \"你的Token\""
-    log_highlight "  2. --token-file /path/to/token.txt"
-    log_highlight "  3. export FEDERATION_TOKEN=\"你的Token\""
-    log_highlight "  4. 在主节点执行后，将 Token 保存到 $TOKEN_FILE"
-    echo ""
-    log_info "获取 Token 的方法:"
-    log_highlight "  在主节点上执行: cat $TOKEN_FILE"
-    echo ""
+  if ! tailscale status &> /dev/null; then
+    log_warn "Tailscale 未登录或未启动"
+    log_info "请运行: sudo tailscale up"
     exit 1
   fi
   
-  # 6. 如果是 master 角色，生成新 Token
-  TOKEN=$(openssl rand -hex 32)
-  save_token "$TOKEN"
-  log_success "生成新 Token: ${TOKEN:0:16}..."
+  TAILSCALE_IP=$(tailscale ip -4 2>/dev/null)
+  log_success "Tailscale IP: $TAILSCALE_IP"
 }
 
-# 保存 Token 到文件
-save_token() {
-  local token=$1
-  mkdir -p "$(dirname "$TOKEN_FILE")"
-  echo "$token" > "$TOKEN_FILE"
-  chmod 600 "$TOKEN_FILE"
-}
+# --- Master 部署逻辑 ---
 
-# 显示 Token 导出帮助
-show_token_export_help() {
-  echo ""
-  echo "═══════════════════════════════════════════════════════════"
-  log_highlight "=== Token 共享方式（在其他机器上使用） ==="
-  echo "═══════════════════════════════════════════════════════════"
-  echo ""
-
-  local token_display
-  if [[ "${SHOW_FULL_TOKEN:-false}" == "true" ]]; then
-    token_display="$TOKEN"
+deploy_master() {
+  log_info ">>> 开始部署 Master (Gateway) 节点 <<<"
+  
+  mkdir -p "$OPENCLAW_HOME"
+  
+  # 生成或读取 Token
+  local token
+  if [[ -f "$OPENCLAW_HOME/.auth-token" ]]; then
+    token=$(cat "$OPENCLAW_HOME/.auth-token")
   else
-    token_display="${TOKEN:0:4}...${TOKEN: -4}"
+    token=$(openssl rand -hex 32)
+    echo "$token" > "$OPENCLAW_HOME/.auth-token"
+    chmod 600 "$OPENCLAW_HOME/.auth-token"
   fi
-  
-  log_info "方式 1: 复制 Token 文件内容"
-  echo "  Token: ${YELLOW}$token_display${NC}"
-  echo "  在其他机器上运行:"
-  echo -e "  ${GREEN}./$SCRIPT_NAME worker --master-ip $TAILSCALE_IP --token-file $TOKEN_FILE${NC}"
-  echo ""
-  
-  log_info "方式 2: SSH 传输 Token 文件"
-  echo "  从主节点复制到工作节点:"
-  echo -e "  ${CYAN}scp $TOKEN_FILE user@worker:$TOKEN_FILE${NC}"
-  echo "  然后在工作节点上运行:"
-  echo -e "  ${GREEN}./$SCRIPT_NAME worker --master-ip $TAILSCALE_IP${NC}"
-  echo ""
-  
-  log_info "方式 3: 直接 SSH 写入"
-  echo -e "  ${CYAN}ssh user@worker \"mkdir -p ~/.openclaw && echo '$TOKEN' > ~/.openclaw/.federation-token\"${NC}"
-  echo ""
-  
-  log_info "方式 4: 环境变量"
-  echo -e "  在工作节点上:"
-  echo -e "  ${CYAN}export FEDERATION_TOKEN=\"\$(cat $TOKEN_FILE)\"${NC}"
-  echo -e "  ${GREEN}./$SCRIPT_NAME worker --master-ip $TAILSCALE_IP${NC}"
-  echo ""
-  
-  if [[ "${SHOW_FULL_TOKEN:-false}" != "true" ]]; then
-    log_info "提示: 如需显示完整 Token，可临时设置 SHOW_FULL_TOKEN=true 再运行部署脚本"
-  fi
-  log_warn "重要: 请保存好这个 Token，所有工作节点需要使用相同的 Token！"
-  echo ""
-}
 
-# 检查 jq 是否安装
-check_jq() {
-  if ! command -v jq &> /dev/null; then
-    log_info "安装 jq（用于安全合并配置）..."
-    if command -v apt-get &> /dev/null; then
-      require_sudo || return 1
-      $SUDO_CMD apt-get update -qq && $SUDO_CMD apt-get install -y -qq jq
-    elif command -v yum &> /dev/null; then
-      require_sudo || return 1
-      $SUDO_CMD yum install -y jq
-    elif command -v dnf &> /dev/null; then
-      require_sudo || return 1
-      $SUDO_CMD dnf install -y jq
-    elif command -v brew &> /dev/null; then
-      local brew_bin
-      brew_bin=$(resolve_brew_bin || true)
-      if [[ -n "$brew_bin" && -n "${SUDO_USER:-}" && $EUID -eq 0 ]]; then
-        sudo -u "$SUDO_USER" "$brew_bin" install jq
-      elif [[ -n "$brew_bin" ]]; then
-        "$brew_bin" install jq
-      else
-        log_warn "无法自动安装 jq，将使用基础配置模式"
-        return 1
-      fi
-    else
-      log_warn "无法自动安装 jq，将使用基础配置模式"
-      return 1
-    fi
-  fi
-  return 0
-}
-
-# 备份现有配置
-backup_config() {
-  if [[ -f "$CONFIG_FILE" ]]; then
-    mkdir -p "$BACKUP_DIR"
-    local backup_name="openclaw.json.backup.$(date +%Y%m%d_%H%M%S)"
-    cp "$CONFIG_FILE" "$BACKUP_DIR/$backup_name"
-    log_success "配置已备份到: $BACKUP_DIR/$backup_name"
-    echo "$backup_name"
-  else
-    echo ""
-  fi
-}
-
-# 安全合并配置
-merge_config_with_jq() {
-  local role=$1
-  local bind_mode=$2
-  local backup_name=$3
-  
-  log_info "使用 jq 安全合并配置..."
-  
-  local gateway_config=$(cat << EOF
-{
-  "gateway": {
-    "port": $GATEWAY_PORT,
-    "bind": "$bind_mode",
-    "mode": "local",
-    "auth": {
-      "mode": "token",
-      "token": "$TOKEN"
-    },
-    "tailscale": {
-      "mode": "off",
-      "resetOnExit": false
-    }
-  },
-  "meta": {
-    "lastTouchedVersion": "$(openclaw version 2>/dev/null | head -1 | awk '{print $2}' || echo 'unknown')",
-    "lastTouchedAt": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
-  }
-}
-EOF
-)
-  
-  jq -s '.[0] * .[1]' "$CONFIG_FILE" <(echo "$gateway_config") > "${CONFIG_FILE}.tmp"
-  mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
-  log_success "配置已安全合并"
-}
-
-# 基础配置模式
-create_basic_config() {
-  local role=$1
-  local bind_mode=$2
-  
-  log_warn "使用基础配置模式"
-  
+  # 写入 Master 配置 (强制绑定 Tailnet)
+  log_info "生成 Gateway 配置..."
   cat > "$CONFIG_FILE" << EOF
 {
-  "meta": {
-    "lastTouchedVersion": "$(openclaw version 2>/dev/null | head -1 | awk '{print $2}' || echo 'unknown')",
-    "lastTouchedAt": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
-  },
   "gateway": {
     "port": $GATEWAY_PORT,
-    "bind": "$bind_mode",
-    "mode": "local",
+    "bind": "tailnet",
     "auth": {
       "mode": "token",
-      "token": "$TOKEN"
-    },
-    "tailscale": {
-      "mode": "off",
-      "resetOnExit": false
+      "token": "$token"
     }
   },
   "agents": {
     "defaults": {
-      "workspace": "__OPENCLAW_HOME__/workspace",
-      "compaction": { "mode": "safeguard" }
+      "workspace": "$OPENCLAW_HOME/workspace"
     }
-  },
-  "channels": {
-    "telegram": { "enabled": true, "dmPolicy": "pairing", "groupPolicy": "allowlist" }
   }
 }
 EOF
 
-  # 替换占位符，避免转义问题
-  sed -i.bak "s#__OPENCLAW_HOME__#$OPENCLAW_HOME#g" "$CONFIG_FILE" 2>/dev/null || \
-    perl -pi -e "s#__OPENCLAW_HOME__#$OPENCLAW_HOME#g" "$CONFIG_FILE"
-  rm -f "${CONFIG_FILE}.bak" 2>/dev/null || true
-}
-
-# 配置 Gateway
-configure_gateway_safe() {
-  local role=$1
-  local bind_mode=$2
-  
-  log_info "配置 OpenClaw Gateway ($role 模式)..."
-  mkdir -p "$(dirname "$CONFIG_FILE")"
-
-  if ! is_valid_bind_mode "$bind_mode"; then
-    log_error "无效的绑定模式: $bind_mode"
-    log_info "可选: loopback/lan/tailnet/auto/custom"
-    exit 1
-  fi
-  
-  local backup_name=$(backup_config)
-  
-  if [[ "$PRESERVE_CONFIG" == "true" && -f "$BACKUP_DIR/$backup_name" ]]; then
-    if check_jq; then
-      merge_config_with_jq "$role" "$bind_mode" "$backup_name"
-    else
-      log_warn "无法安全合并配置"
-      read -p "继续将覆盖配置? [y/N]: " choice
-      [[ "$choice" =~ ^[Yy]$ ]] || exit 0
-      create_basic_config "$role" "$bind_mode"
-    fi
-  else
-    create_basic_config "$role" "$bind_mode"
-  fi
-  
-  if [[ -f "$CONFIG_FILE" ]]; then
-    log_success "Gateway 配置完成"
-    log_info "绑定模式: $bind_mode"
-    if command -v jq &> /dev/null; then
-      jq '.gateway | {port, bind, auth: {mode: .auth.mode}}' "$CONFIG_FILE" 2>/dev/null || true
-    fi
-  fi
-}
-
-# 检测操作系统
-detect_os() {
-  if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    log_info "检测到系统: $NAME"
-  fi
-}
-
-# 安装并配置 Tailscale
-setup_tailscale() {
-  log_info "检查 Tailscale..."
-  
-  if ! command -v tailscale &> /dev/null; then
-    log_info "安装 Tailscale（安全模式，优先包管理器）..."
-    if ! install_tailscale_safe; then
-      if [[ "${ALLOW_UNSAFE_TAILSCALE_INSTALL:-false}" == "true" ]]; then
-        log_warn "安全安装失败，使用不安全模式（curl | sh）"
-        curl -fsSL https://tailscale.com/install.sh | sh
-      else
-        log_error "无法通过包管理器安装 Tailscale"
-        log_info "请手动安装后重试，或设置 ALLOW_UNSAFE_TAILSCALE_INSTALL=true 允许使用 curl | sh"
-        exit 1
-      fi
-    fi
-  else
-    log_success "Tailscale 已安装"
-  fi
-  
-  if ! tailscale status &> /dev/null; then
-    log_info "启动 Tailscale 服务..."
-    start_tailscale_daemon
-  fi
-
-  if ! tailscale status &> /dev/null; then
-    log_info "请在浏览器中完成 Tailscale 登录..."
-    local ts_cmd="tailscale up"
-    if [[ "$(uname -s)" != "Darwin" ]]; then
-      require_sudo || { log_error "无法执行 tailscale up"; exit 1; }
-      ts_cmd="$SUDO_CMD tailscale up"
-    fi
-    if ! eval "$ts_cmd"; then
-      log_error "无法连接到 Tailscale 服务"
-      if [[ "$(uname -s)" == "Darwin" ]]; then
-        log_info "macOS 请先打开 Tailscale.app 并完成登录"
-      else
-        log_info "请确认 tailscaled 服务已启动"
-      fi
-      exit 1
-    fi
-  else
-    log_success "Tailscale 已登录"
-  fi
-  
-  TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -1)
-  if [[ -z "$TAILSCALE_IP" ]]; then
-    log_error "无法获取 Tailscale IP"
-    exit 1
-  fi
-  log_success "Tailscale IP: $TAILSCALE_IP"
-}
-
-install_tailscale_safe() {
-  if command -v tailscale &> /dev/null; then
-    return 0
-  fi
-
-  if pkg_has_tailscale; then
-    log_warn "检测到 Tailscale 已通过包管理器安装，但命令不可用"
-    log_warn "请检查 PATH 或重新登录后再试"
-    return 0
-  fi
-
-  if command -v apt-get &> /dev/null; then
-    log_info "尝试使用 apt 安装..."
-    require_sudo || return 1
-    $SUDO_CMD apt-get update -qq || true
-    if $SUDO_CMD apt-get install -y -qq tailscale; then
-      return 0
-    fi
-    if is_ubuntu; then
-      log_warn "APT 源中未找到 tailscale，尝试添加官方源..."
-      if install_tailscale_ubuntu_repo; then
-        return 0
-      fi
-    fi
-  elif command -v dnf &> /dev/null; then
-    log_info "尝试使用 dnf 安装..."
-    require_sudo || return 1
-    if $SUDO_CMD dnf install -y tailscale; then
-      return 0
-    fi
-  elif command -v yum &> /dev/null; then
-    log_info "尝试使用 yum 安装..."
-    require_sudo || return 1
-    if $SUDO_CMD yum install -y tailscale; then
-      return 0
-    fi
-  else
-    local brew_bin
-    brew_bin=$(resolve_brew_bin || true)
-    if [[ -n "$brew_bin" ]]; then
-      if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
-        log_info "尝试使用 brew 安装（以用户 $SUDO_USER 运行）..."
-        if sudo -u "$SUDO_USER" "$brew_bin" install tailscale; then
-          return 0
-        fi
-      elif [[ $EUID -eq 0 ]]; then
-        log_warn "检测到 brew，但当前为 root，无法安全运行 brew"
-      else
-        log_info "尝试使用 brew 安装..."
-        if "$brew_bin" install tailscale; then
-          return 0
-        fi
-      fi
-    fi
-  fi
-
-  return 1
-}
-
-# 检查 OpenClaw
-check_openclaw() {
-  log_info "检查 OpenClaw..."
-  
-  if command -v openclaw &> /dev/null; then
-    log_success "OpenClaw 已安装"
-    return 0
-  fi
-
-  if npm_has_package "openclaw"; then
-    log_success "OpenClaw 已安装（npm 全局）"
-    log_warn "openclaw 命令未在 PATH 中，跳过重复安装"
-    return 0
-  fi
-  
-  log_info "安装 OpenClaw..."
-  if ! command -v npm &> /dev/null; then
-    require_sudo || { log_error "需要 sudo 安装 Node.js"; exit 1; }
-    curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO_CMD bash -
-    $SUDO_CMD apt-get install -y nodejs
-  fi
-  if npm install -g openclaw; then
-    log_success "OpenClaw 安装完成"
-    return 0
-  fi
-  if [[ -n "$SUDO_CMD" ]]; then
-    log_warn "尝试使用 sudo 安装 OpenClaw..."
-    if $SUDO_CMD npm install -g openclaw; then
-      log_success "OpenClaw 安装完成"
-      return 0
-    fi
-  fi
-  log_error "OpenClaw 安装失败，请检查 npm 全局目录权限或使用 sudo"
-  exit 1
-}
-
-# 启动 Gateway
-start_gateway() {
-  log_info "启动 OpenClaw Gateway..."
-  
-  if openclaw gateway status &> /dev/null; then
-    log_warn "Gateway 已在运行，重启中..."
-    openclaw gateway stop 2>/dev/null || true
-    sleep 2
-  fi
-  
+  # 2. 安装并启动服务
+  log_info "注册 Gateway 系统服务..."
+  openclaw gateway stop 2>/dev/null || true
+  openclaw gateway install --force
   openclaw gateway start
-  sleep 2
   
+  sleep 3
   if openclaw gateway status &> /dev/null; then
-    log_success "Gateway 启动成功"
+    log_success "Master Gateway 已启动!"
+    echo ""
+    echo "=================================================="
+    echo "Master 部署成功信息"
+    echo "=================================================="
+    echo "Tailscale IP: $TAILSCALE_IP"
+    echo "端口:         $GATEWAY_PORT"
+    echo "Admin Token:  $token"
+    echo ""
+    echo "请复制上面的 IP，用于部署 Worker 节点。"
+    echo "=================================================="
   else
-    log_error "Gateway 启动失败"
+    log_error "Gateway 启动失败，请运行 'openclaw gateway logs' 查看原因"
     exit 1
   fi
 }
 
-# 安装技能
-install_skills() {
-  local skills=$1
-  [[ -z "$skills" ]] && return 0
-  
-  log_info "安装技能: $skills"
-  for skill in $skills; do
-    openclaw skills install "$skill" 2>/dev/null || log_warn "$skill 安装失败"
-  done
-}
+# --- Worker / Hybrid 部署逻辑 ---
 
-# 开放防火墙
-open_firewall() {
-  log_info "配置防火墙..."
-  if command -v ufw &> /dev/null; then
-    require_sudo || return 0
-    $SUDO_CMD ufw allow $GATEWAY_PORT/tcp 2>/dev/null || true
-  elif command -v firewall-cmd &> /dev/null; then
-    require_sudo || return 0
-    $SUDO_CMD firewall-cmd --permanent --add-port=$GATEWAY_PORT/tcp 2>/dev/null || true
-    $SUDO_CMD firewall-cmd --reload 2>/dev/null || true
+deploy_worker() {
+  local role=$1
+  local master_ip=$2
+  
+  if [[ -z "$master_ip" ]]; then
+    log_error "Worker/Hybrid 部署需要指定 Master IP"
+    echo "用法: $0 $role <MASTER_TAILSCALE_IP>"
+    exit 1
   fi
-}
 
-# Worker 节点信息显示
-show_worker_info() {
-  local master_ip=$1
-  local node_name=$2
+  local worker_state_dir="$OPENCLAW_HOME" # 默认 Worker 使用标准目录
   
-  [[ -z "$master_ip" ]] && { log_error "Worker 需要 --master-ip"; exit 1; }
-  [[ -z "$node_name" ]] && node_name=$(hostname -s)
+  if [[ "$role" == "hybrid" ]]; then
+    log_info ">>> 开始部署 Hybrid (混合) 节点 <<<"
+    log_info "模式: 隔离状态目录，避免与本地 Gateway 冲突"
+    worker_state_dir="$WORKER_HOME" # Hybrid 模式切换到隔离目录
+    mkdir -p "$worker_state_dir"
+    # 确保权限正确 (如果是 sudo 运行)
+    if [[ -n "${SUDO_USER:-}" ]]; then
+      chown -R "$SUDO_USER" "$worker_state_dir"
+    fi
+  else
+    log_info ">>> 开始部署 Worker (纯节点) <<<"
+  fi
   
-  local my_ip=$(tailscale ip -4 | head -1)
+  log_info "目标 Master: $master_ip"
 
-  mkdir -p "$OPENCLAW_HOME"
-  cat > "$OPENCLAW_HOME/.node-info.json" << EOF
-{
-  "name": "$node_name",
-  "tailscale_ip": "$my_ip",
-  "master_ip": "$master_ip",
-  "skills": "$NODE_SKILLS",
-  "registered_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
+  # 1. 处理本地 Gateway 状态
+  if [[ "$role" == "hybrid" ]]; then
+    if ! openclaw gateway status &> /dev/null; then
+      log_warn "本地 Gateway 未运行，正在尝试启动..."
+      openclaw gateway start
+      if openclaw gateway status &> /dev/null; then
+        log_success "本地 Gateway 已启动 (Hybrid 正常)"
+      else
+        log_warn "本地 Gateway 启动失败，但这不影响 Worker 连接"
+      fi
+    else
+      log_info "本地 Gateway 正在运行 (保持原样)"
+    fi
+  else
+    # 纯 Worker 模式：确保 Gateway 停止
+    if openclaw gateway status &> /dev/null; then
+      log_warn "检测到正在运行的 Gateway，正在停止..."
+      openclaw gateway stop
+      $SUDO_CMD systemctl disable $SERVICE_NAME_MASTER 2>/dev/null || true
+      log_success "已停止本地 Gateway (Worker 纯净模式)"
+    fi
+  fi
+
+  # 2. 创建 Worker 连接服务
+  log_info "创建 Worker 连接服务..."
+  
+  local service_file="/etc/systemd/system/$SERVICE_NAME_WORKER.service"
+  local user="${SUDO_USER:-$USER}"
+  local node_bin=$(command -v openclaw)
+  local connect_url="ws://${master_ip}:${GATEWAY_PORT}"
+
+  # 生成 Systemd Unit
+  # 注意：在 Environment 中注入 OPENCLAW_STATE_DIR 以实现隔离
+  cat << EOF | $SUDO_CMD tee "$service_file" > /dev/null
+[Unit]
+Description=OpenClaw Worker Connection (To Master: $master_ip)
+After=network.target tailscaled.service
+
+[Service]
+Type=simple
+User=$user
+Restart=always
+RestartSec=10
+ExecStart=$node_bin nodes connect "$connect_url"
+Environment=NODE_ENV=production
+Environment=OPENCLAW_STATE_DIR=$worker_state_dir
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-  log_success "工作节点配置完成！"
+  $SUDO_CMD systemctl daemon-reload
+  $SUDO_CMD systemctl enable "$SERVICE_NAME_WORKER"
+  $SUDO_CMD systemctl restart "$SERVICE_NAME_WORKER"
+
+  log_success "连接服务已启动 ($SERVICE_NAME_WORKER)"
   echo ""
-  log_highlight "=== 节点信息 ==="
-  cat "$OPENCLAW_HOME/.node-info.json"
+  echo "=================================================="
+  if [[ "$role" == "hybrid" ]]; then
+    echo "Hybrid 部署成功 (混合模式)"
+    echo "- 本地 Gateway: 运行中 (数据在 ~/.openclaw)"
+    echo "- 远程 Worker:  运行中 (数据隔离在 ~/.openclaw-worker)"
+  else
+    echo "Worker 部署成功"
+    echo "- 本地 Gateway: 已停止"
+    echo "- 远程 Worker:  运行中 (数据在 ~/.openclaw)"
+  fi
+  echo "=================================================="
+  echo "1. 节点正在尝试连接 Master..."
+  echo "2. 请现在回到 Master 机器，运行以下命令批准连接："
   echo ""
-  log_highlight "=== 在主节点执行以下命令添加此节点 ==="
-  echo ""
-  echo -e "${GREEN}openclaw pair approve \\\n  --name \"$node_name\" \\\n  --url \"ws://$my_ip:$GATEWAY_PORT\" \\\n  --token \"${TOKEN:0:16}...\"${NC}"
-  echo ""
+  echo "   ./manage-federation.sh pending"
+  echo "   ./manage-federation.sh approve <Request_ID>"
+  echo "=================================================="
 }
 
-# Master 节点信息显示
-show_master_info() {
-  log_success "主节点部署完成！"
-  echo ""
-  log_highlight "=== 管理命令 ==="
-  echo ""
-  echo "查看所有节点:"
-  echo -e "  ${CYAN}openclaw nodes list${NC}"
-  echo ""
-  echo "添加新节点:"
-  echo -e "  ${CYAN}openclaw pair approve --name <名称> --url ws://<IP>:$GATEWAY_PORT --token <token>${NC}"
-  echo ""
-  echo "Token 文件位置:"
-  echo -e "  ${CYAN}$TOKEN_FILE${NC}"
-}
+# --- 主流程 ---
 
-# 主入口
 main() {
-  echo -e "${BLUE}"
-  echo "╔════════════════════════════════════════════════════════════╗"
-  echo "║     OpenClaw + Tailscale 联邦部署脚本 (Token 共享版)      ║"
-  echo "╚════════════════════════════════════════════════════════════╝"
-  echo -e "${NC}"
-  
-  [[ -z "$ROLE" ]] && { show_help; exit 1; }
-  [[ "$ROLE" != "master" && "$ROLE" != "worker" ]] && { log_error "无效角色"; exit 1; }
+  local role=$1
+  shift
   
   init_privilege
-  detect_os
-  
-  # 获取 Token
-  get_or_generate_token
-  
   setup_tailscale
-  check_openclaw
+  install_openclaw
   
-  # 决定绑定模式
-  local bind_mode="$BIND_MODE"
-  if [[ -z "$bind_mode" && "$BIND_TAILSCALE" == "true" ]]; then
-    bind_mode="tailnet"
-  fi
-  if [[ -z "$bind_mode" ]]; then
-    # 默认使用 lan，保持与历史 0.0.0.0 行为一致
-    bind_mode="lan"
-  fi
-
-  if ! is_valid_bind_mode "$bind_mode"; then
-    log_error "无效的绑定模式: $bind_mode"
-    log_info "可选: loopback/lan/tailnet/auto/custom"
-    exit 1
-  fi
-
-  case "$bind_mode" in
-    loopback)
-      log_info "Gateway 将绑定 loopback（仅本机访问）"
+  case "$role" in
+    master)
+      deploy_master
       ;;
-    lan)
-      log_info "Gateway 将绑定 lan（局域网访问）"
-      log_warn "如需通过 Tailscale 访问，请使用 --bind-tailscale 或 --bind-mode tailnet"
+    worker)
+      deploy_worker "worker" "$@"
       ;;
-    tailnet)
-      log_info "Gateway 将绑定 tailnet（Tailscale 网络）"
-      log_warn "注意: tailnet 模式下无法通过 127.0.0.1 访问"
+    hybrid)
+      deploy_worker "hybrid" "$@"
       ;;
-    auto)
-      log_info "Gateway 将绑定 auto（自动选择）"
-      ;;
-    custom)
-      log_warn "Gateway 绑定 custom 需要进一步配置，请参考官方文档"
+    *)
+      echo "用法: $0 {master|worker|hybrid} [args...]"
+      echo "  $0 master                   部署主节点 (大脑)"
+      echo "  $0 worker <MASTER_IP>       部署纯工作节点 (手脚)"
+      echo "  $0 hybrid <MASTER_IP>       部署混合节点 (独立隔离状态)"
+      exit 1
       ;;
   esac
-  
-  if [[ -f "$CONFIG_FILE" && "$PRESERVE_CONFIG" == "true" ]]; then
-    echo ""
-    log_warn "检测到现有 OpenClaw 配置"
-    log_info "本脚本将保留所有原有设置，只修改 gateway 部分"
-    read -p "继续部署? [Y/n]: " confirm
-    [[ "$confirm" =~ ^[Nn]$ ]] && { log_info "已取消"; exit 0; }
-  fi
-  
-  configure_gateway_safe "$ROLE" "$bind_mode"
-  
-  [[ "$ROLE" == "master" ]] && open_firewall
-  
-  start_gateway
-  install_skills "$NODE_SKILLS"
-  
-  if [[ "$ROLE" == "master" ]]; then
-    show_master_info
-    show_token_export_help
-    
-    # 配置中心选项
-    echo ""
-    if [[ "$ENABLE_CONFIG_CENTER" == "true" ]]; then
-      log_warn "配置中心脚本 (config-center.sh) 已被移除，--enable-config-center 选项无效"
-    fi
-  else
-    show_worker_info "$MASTER_IP" "$NODE_NAME"
-    
-    # Worker 自动注册提示
-    echo ""
-    log_info "可选操作:"
-    log_info "  1. 自动注册到 Master: auto-register.sh"
-  fi
-  
-  echo ""
-  log_success "部署完成！"
 }
 
-main
+main "$@"
