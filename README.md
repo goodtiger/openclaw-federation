@@ -1,103 +1,54 @@
-# OpenClaw Federation Deployment
+# OpenClaw Federation Scripts
 
-> Multi-node OpenClaw federation deployment and management solution
+A collection of utility scripts for deploying and managing OpenClaw Federation nodes.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+## Scripts Overview
 
-## Overview
+### 1. Deploy Federation (`bin/deploy-federation.sh`)
+This is the primary script for setting up a new OpenClaw node. It handles installation, configuration, and joining a federation.
 
-This project provides a complete solution for deploying and managing OpenClaw across multiple machines, forming a federated cluster where:
-
-- **Master Node**: Central coordination hub
-- **Worker Nodes**: Execution nodes with different skills (Docker, K8s, Apple Notes, etc.)
-- **Tailscale Network**: Secure encrypted tunnel between all nodes
-- **Platforms**: Linux/macOS/Raspberry Pi (mix and match for Master/Worker)
-
-## Quick Start
-
+**Usage:**
 ```bash
-# 1. Deploy Master
-sudo ./bin/deploy-federation.sh master --bind-tailscale
+# Basic deployment (interactive)
+./bin/deploy-federation.sh
 
-# 2. Deploy Worker
-sudo ./bin/deploy-federation.sh worker \
-  --master-ip 100.64.0.1 \
-  --token-file /root/.openclaw/.federation-token
+# Deploy as Master (Gateway)
+./bin/deploy-federation.sh --role master --token <your-token>
 
-# 3. Verify
-./bin/manage-federation.sh list
+# Deploy as Worker (Node)
+./bin/deploy-federation.sh --role worker --master-url <master-url> --token <token>
 ```
 
-If your system doesn't have `/root` (e.g. macOS), set `TOKEN_FILE` to a custom path.
+### 2. Manage Federation (`bin/manage-federation.sh`)
+A utility for managing the federation state, checking status, and performing maintenance tasks on an existing installation.
 
-## Directory Structure
-
-```
-.
-├── bin/              # Core executable scripts
-│   ├── deploy-federation.sh
-│   ├── health-check.sh
-│   ├── auto-register.sh
-│   ├── config-center.sh
-│   ├── switch-bind-mode.sh
-│   ├── config-manager.sh
-│   ├── manage-federation.sh
-│   └── task-share.sh
-│
-├── docs/             # Documentation
-│   ├── README.md
-│   ├── FEDERATION_README.md
-│   └── SAFE_DEPLOY_README.md
-│
-├── tests/            # Test scripts
-│   └── test-*.sh
-│
-├── demos/            # Demo scripts
-│   └── demo-*.sh
-│
-└── .gitignore
-```
-
-## Core Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `bin/deploy-federation.sh` | Deploy Master or Worker nodes |
-| `bin/health-check.sh` | Monitor node health status |
-| `bin/auto-register.sh` | Automatic node registration |
-| `bin/config-center.sh` | Centralized configuration management |
-| `bin/switch-bind-mode.sh` | Dynamic binding mode switch |
-| `bin/config-manager.sh` | Config backup/restore |
-| `bin/manage-federation.sh` | Node management |
-| `bin/task-share.sh` | Task collaboration system |
-
-## Documentation
-
-- [Main Documentation](docs/README.md)
-- [Federation Architecture](docs/FEDERATION_README.md)
-- [Safe Deployment Guide](docs/SAFE_DEPLOY_README.md)
-
-## Testing
-
+**Usage:**
 ```bash
-# Run comprehensive tests
-cd tests
-bash test-complete.sh
+./bin/manage-federation.sh [command]
+
+# Common commands:
+# status   - Show current node status
+# restart  - Restart OpenClaw services
+# update   - Update OpenClaw to latest version
 ```
 
-## Demos
+### 3. Auto Register (`bin/auto-register.sh`)
+Helper script to automatically approve pending worker nodes on the Master gateway. Useful for automated deployments.
 
+**Usage:**
 ```bash
-# View interactive demos
-cd demos
-bash demo-token-sharing.sh
-bash demo-task-share.sh
+# Run on Master node
+./bin/auto-register.sh
 ```
 
-## License
+## Architecture
 
-MIT License
+- **Master (Gateway):** The central control plane. Manages task distribution and worker coordination.
+- **Worker (Node):** Executes tasks. Connects to the Master via secure tunnel (Tailscale/WireGuard).
+- **Hybrid:** A node can function as both Master and Worker for smaller deployments.
 
-## Contributing
+## Prerequisites
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+- Ubuntu/Debian based system
+- Root or sudo access
+- Internet connection for fetching dependencies
