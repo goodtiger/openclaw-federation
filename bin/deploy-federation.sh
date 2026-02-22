@@ -103,9 +103,38 @@ deploy_master() {
     chmod 600 "$OPENCLAW_HOME/.auth-token"
   fi
 
-  # 写入 Master 配置 (强制绑定 Tailnet)
-  log_info "生成 Gateway 配置..."
-  cat > "$CONFIG_FILE" << EOF
+  if [[ -f "$CONFIG_FILE" ]]; then
+    local backup_file="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    log_info "发现现有配置文件，正在备份至: $backup_file"
+    cp "$CONFIG_FILE" "$backup_file"
+    
+    if ! command -v jq &> /dev/null; then
+      log_info "未检测到 jq，尝试自动安装以进行安全合并..."
+      if command -v apt-get &> /dev/null; then
+        $SUDO_CMD apt-get update -qq && $SUDO_CMD apt-get install -y jq
+      elif command -v brew &> /dev/null; then
+        brew install jq
+      elif command -v yum &> /dev/null; then
+        $SUDO_CMD yum install -y jq
+      fi
+    fi
+
+    if command -v jq &> /dev/null; then
+      log_info "安全更新 Gateway 配置 (保留原有的模型、渠道等设置)..."
+      jq --arg port "$GATEWAY_PORT" \
+         --arg bind "tailnet" \
+         --arg token "$token" \
+         '.gateway.port = ($port|tonumber) | .gateway.bind = $bind | .gateway.auth.mode = "token" | .gateway.auth.token = $token' \
+         "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"
+      mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    else
+      log_warn "由于缺失 jq 工具，为防止配置覆盖，已跳过配置文件修改！"
+      log_warn "请手动编辑 $CONFIG_FILE 设置 gateway.bind 为 tailnet 及对应 token。"
+    fi
+  else
+    # 写入 Master 配置 (强制绑定 Tailnet)
+    log_info "生成初始 Gateway 配置..."
+    cat > "$CONFIG_FILE" << EOF
 {
   "gateway": {
     "port": $GATEWAY_PORT,
@@ -122,6 +151,7 @@ deploy_master() {
   }
 }
 EOF
+  fi
 
   # 2. 安装并启动服务
   log_info "注册 Gateway 系统服务..."

@@ -25,6 +25,7 @@ cd bin
 
 *   脚本会自动安装 Tailscale 和 OpenClaw。
 *   启动 Gateway 并生成 Admin Token。
+*   **安全部署机制**：如果你在已有 OpenClaw 的机器上部署，脚本会**自动备份**现有配置，并仅修改 Gateway 绑定为 Tailnet 网络，**原样保留**你已配置的模型 API Keys、Telegram/WhatsApp 渠道设置和 Agent 参数。
 *   **记录下脚本结束时显示的 Master Tailscale IP。**
 
 ### 2. 部署 Worker (工作节点)
