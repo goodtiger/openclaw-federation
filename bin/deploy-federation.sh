@@ -953,33 +953,15 @@ main() {
     # 配置中心选项
     echo ""
     if [[ "$ENABLE_CONFIG_CENTER" == "true" ]]; then
-      log_info "正在启动配置中心..."
-      if [[ -f "$SCRIPT_DIR/config-center.sh" ]]; then
-        "$SCRIPT_DIR/config-center.sh" master start
-        log_success "配置中心已启动"
-      elif [[ -f "/root/.openclaw/workspace/config-center.sh" ]]; then
-        /root/.openclaw/workspace/config-center.sh master start
-        log_success "配置中心已启动"
-      else
-        log_warn "配置中心脚本不存在，跳过"
-      fi
-    else
-      log_info "配置中心未启用（使用 --enable-config-center 启用）"
-      log_info "如需手动启动，请运行: config-center.sh master start"
+      log_warn "配置中心脚本 (config-center.sh) 已被移除，--enable-config-center 选项无效"
     fi
-    
-    # 健康检查提示
-    echo ""
-    log_info "提示: 可以安装健康检查服务监控节点状态"
-    log_info "运行: health-check.sh install"
   else
     show_worker_info "$MASTER_IP" "$NODE_NAME"
     
-    # Worker 自动注册和配置同步提示
+    # Worker 自动注册提示
     echo ""
     log_info "可选操作:"
     log_info "  1. 自动注册到 Master: auto-register.sh"
-    log_info "  2. 同步配置（如启用配置中心）: config-center.sh worker sync"
   fi
   
   echo ""
