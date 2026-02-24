@@ -60,7 +60,7 @@ exec_on() {
   fi
   
   log "在 [$node] 上执行: $cmd"
-  openclaw nodes invoke "$node" -- $cmd
+  openclaw nodes invoke "$node" -- "$cmd"
 }
 
 # 广播命令到所有节点
@@ -90,7 +90,7 @@ broadcast() {
   for node in $nodes; do
     echo "--------------------------------"
     echo -e "节点: ${GREEN}$node${NC}"
-    openclaw nodes invoke "$node" -- $cmd || echo "执行失败"
+    openclaw nodes invoke "$node" -- "$cmd" || echo "执行失败"
   done
   echo "--------------------------------"
 }
@@ -119,6 +119,13 @@ EOF
 }
 
 # 主入口
+case "${1:-}" in
+  help|--help|-h|"")
+    show_help
+    exit 0
+    ;;
+esac
+
 check_gateway
 
 case "${1:-}" in
@@ -142,9 +149,6 @@ case "${1:-}" in
     ;;
   status)
     openclaw gateway status
-    ;;
-  help|--help|-h|"")
-    show_help
     ;;
   *)
     error "未知命令: $1\n请运行 '$0 help' 查看帮助"

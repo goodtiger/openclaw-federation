@@ -48,11 +48,12 @@ approve_all() {
   done
 }
 
-# 单词运行模式
+# 单次运行模式
 run_once() {
   log "检查待处理请求..."
   approve_all
-  local count=$(openclaw nodes list --json | jq 'length')
+  local count
+  count=$(openclaw nodes list --json 2>/dev/null | jq 'length' 2>/dev/null || echo "未知")
   log "当前在线节点数: $count"
 }
 

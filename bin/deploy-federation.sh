@@ -40,7 +40,13 @@ init_privilege() {
 # 获取当前用户的 OpenClaw 目录
 resolve_user_home() {
   if [[ -n "${SUDO_USER:-}" ]]; then
-    echo "$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    # macOS 用 dscl，Linux 用 getent
+    if command -v dscl &> /dev/null; then
+      dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}' \
+        || eval echo "~$SUDO_USER"
+    else
+      getent passwd "$SUDO_USER" | cut -d: -f6
+    fi
   else
     echo "$HOME"
   fi
@@ -61,8 +67,18 @@ install_openclaw() {
   log_info "正在安装 OpenClaw CLI..."
   if ! command -v npm &> /dev/null; then
     log_info "安装 Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO_CMD bash -
-    $SUDO_CMD apt-get install -y nodejs
+    if command -v apt-get &> /dev/null; then
+      curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO_CMD bash -
+      $SUDO_CMD apt-get install -y nodejs
+    elif command -v brew &> /dev/null; then
+      brew install node@22
+    elif command -v yum &> /dev/null; then
+      curl -fsSL https://rpm.nodesource.com/setup_22.x | $SUDO_CMD bash -
+      $SUDO_CMD yum install -y nodejs
+    else
+      log_error "无法自动安装 Node.js，请手动安装后重试"
+      exit 1
+    fi
   fi
   
   $SUDO_CMD npm install -g openclaw
@@ -83,6 +99,10 @@ setup_tailscale() {
   fi
   
   TAILSCALE_IP=$(tailscale ip -4 2>/dev/null)
+  if [[ -z "$TAILSCALE_IP" ]]; then
+    log_error "无法获取 Tailscale IP，请确认 Tailscale 已连接并分配了 IP"
+    exit 1
+  fi
   log_success "Tailscale IP: $TAILSCALE_IP"
 }
 
@@ -235,7 +255,8 @@ deploy_worker() {
   
   local service_file="/etc/systemd/system/$SERVICE_NAME_WORKER.service"
   local user="${SUDO_USER:-$USER}"
-  local node_bin=$(command -v openclaw)
+  local node_bin
+  node_bin=$(command -v openclaw)
   local connect_url="ws://${master_ip}:${GATEWAY_PORT}"
 
   # 生成 Systemd Unit
